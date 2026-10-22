@@ -1,0 +1,18 @@
+{
+    "data-share": {
+        "shares": [
+            {
+                "name": "strata",
+                "permission": {
+                    "rw": [
+                        "strata"
+                    ]
+                }
+            }
+        ]
+    },
+    "api-scope": [
+        "trim.file.sharedAccess",
+        "trim.file.userAccess"
+    ]
+}

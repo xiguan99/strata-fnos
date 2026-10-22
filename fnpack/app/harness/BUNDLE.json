@@ -1,0 +1,13 @@
+{
+  "component": "deepseek-harness",
+  "version": "0.2.1-alpha.3",
+  "commit": "571902028a",
+  "license": "MIT",
+  "platform": "linux",
+  "node": "v24.12.0",
+  "bytes": 235636334,
+  "files": 23410,
+  "entry": "apps/cli/lib/bin.js",
+  "builtAt": "2026-10-18T22:25:43.731Z",
+  "note": "Pruned production install (pnpm deploy --prod). No package manager runs on the user's PC."
+}

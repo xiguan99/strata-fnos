@@ -1,0 +1,27 @@
+#!/bin/bash
+# 安装后回调：建数据目录 → 首启 → 就绪确认（无外部依赖，即刻可起）
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+touch "${LOG_FILE}" 2>/dev/null || true
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+
+LIB_TYPE="${wizard_data_library_type:-data}"
+if [ "${LIB_TYPE}" = "data" ]; then
+    DATA_LIBRARY_PATH="${TRIM_PKGVAR}"
+else
+    DATA_LIBRARY_PATH="${TRIM_DATA_SHARE_PATHS%%:*}"
+fi
+RUN_USER="${wizard_run_user:-root}"
+DATA_DIR="${DATA_LIBRARY_PATH}/data"
+
+log_msg "install_callback: DATA=${DATA_LIBRARY_PATH}, USER=${RUN_USER}"
+[ -n "${DATA_LIBRARY_PATH}" ] && mkdir -p "${DATA_DIR}"
+
+if [ "${RUN_USER}" != "root" ] && id "${RUN_USER}" >/dev/null 2>&1; then
+    chown -R "${RUN_USER}" "${DATA_DIR}" 2>/dev/null || true
+    chown -R "${RUN_USER}" "${TRIM_PKGVAR}" 2>/dev/null || true
+fi
+
+bash "$(dirname "$0")/main" start || { echo "启动失败，详见应用中心日志"; exit 1; }
+echo "Strata 已启动：桌面图标进入 /app/strata（经统一网关），浏览器直连 http://<NAS>:8791/"
+log_msg "install_callback 完成"
+exit 0

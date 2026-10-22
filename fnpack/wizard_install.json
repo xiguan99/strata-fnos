@@ -1,0 +1,51 @@
+[
+    {
+        "stepTitle": "存储与运行配置",
+        "items": [
+            {
+                "type": "radio",
+                "field": "wizard_data_library_type",
+                "label": "数据存储位置",
+                "initValue": "data",
+                "options": [
+                    {
+                        "label": "数据目录 (Data)",
+                        "value": "data"
+                    },
+                    {
+                        "label": "共享目录 (Share)",
+                        "value": "share"
+                    }
+                ]
+            },
+            {
+                "type": "radio",
+                "field": "wizard_run_user",
+                "label": "运行权限",
+                "initValue": "root",
+                "options": [
+                    {
+                        "label": "超级管理员 (Root)",
+                        "value": "root"
+                    },
+                    {
+                        "label": "普通用户 (Package)",
+                        "value": "strata"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "<strong>注意：</strong>相关配置仅限安装时选定，安装完成后请勿随意修改，否则可能引发权限异常、服务无法启动或数据丢失。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<strong>运行时自带：</strong>node/python/引擎均为官方 AppImage 解包件，无需在线安装依赖；安装完成即可用。数据落在所选数据目录的 data/Documents/Strata（Models/Workspace）。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<strong>模型目录：</strong>选「普通用户」运行时，GUI Setup 要写入的模型目录须运行用户（套件用户）可写——属主是别人的目录会反复重跑 prepare。磁盘紧张时，GUI 选「已有文件夹」或 CLI <code>--gguf-dir</code> 直读已有 GGUF（不复制不重下，仅需 ~6GB 余量）。本构建已捆绑 gguf-py，安装器无需 GitHub 网络。"
+            }
+        ]
+    }
+]

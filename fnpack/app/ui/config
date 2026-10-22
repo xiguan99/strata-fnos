@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "strata.Application": {
+      "title": "Strata",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/strata",
+      "gatewaySocket": "app.sock",
+      "url": "/app/strata",
+      "allUsers": true
+    }
+  }
+}
