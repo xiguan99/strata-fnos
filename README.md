@@ -1,75 +1,107 @@
 # strata-fnos
 
-[Strata](https://github.com/Niko1221/Strata) 官方桌面应用（v0.2.2，MIT）的 fnOS 原生打包版。
-AppImage 解包全量入库（node / host / control / harness / engine-bundle cuda12），零宿主机依赖；
-无壳单进程原生直跑（用户拍板 2026-10-23：自带运行时、能原生绑 0.0.0.0 的程序不套壳反代）。构建：`scripts/build.sh` → `dist/strata_v<版本>_x86.fpk`。
+[Strata](https://github.com/Niko1221/Strata)（v0.2.2，MIT）的 fnOS 原生打包版。Strata 是一个本地大模型对话工作台：接入 GGUF 模型后可在设备 GPU 上直接对话、看图，不依赖云端 API。
 
-## 运行时架构
+本包把 Strata 官方 AppImage 解包后的全部运行时（node、host、control、harness、CUDA 引擎）一起装进 fpk，**零宿主机依赖**——不需要预装 node、Python 或 CUDA 运行时，装上就能跑。装完后浏览器访问 `http://<NAS 地址>:8791/` 即可，桌面图标同样直达。
 
-- **strata host**（自带 node runtime 跑 `server/index.mjs --dist dist`，单进程原生绑 **0.0.0.0:8791**；桌面图标端口直达，不走统一网关）
-- 数据根：所选数据库 `data/Documents/Strata`（Models / Workspace），通过 `HOME` 注入
-- 引擎：包内 `engine-bundle/0.1.47-linux-x86_64-cuda-cuda12`（自带 libcublas 12，GPU 空闲时可自管启动）；GPU 被占用时可指向已在跑的 llama.cpp 后端（app 自动发现 `http://127.0.0.1:8080/v1`）
+## 特性
+
+- **自带运行时**：node、控制层、引擎全部随包分发，不向 NAS 安装任何系统级依赖。
+- **单进程原生直跑**：Strata 自身服务直接绑定 `0.0.0.0:8791`，不套反向代理、不走统一网关，桌面图标与端口访问行为一致。
+- **局域网可用**：从任何局域网设备用 `http://<NAS 地址>:8791/` 打开都能正常使用。
+- **数据位置可选**：安装向导里可把数据放在套件私有目录或指定的共享目录；模型与工作区统一放在数据根的 `Documents/Strata` 下。
+- **模型下载走可达镜像**：内置 `HF_ENDPOINT` 默认指向国内可达的 hf-mirror，同时保留官方源与本地预置两条路。
+- **可复用已有模型**：已下载好的 GGUF 可直接就地读取，不重复下载、不重复复制。
 
 ## 安装
 
-fnOS 应用中心 → 手动安装 fpk。向导选数据位置与运行权限（安装后勿改）。装完桌面图标/浏览器端口直达 `http://<NAS>:8791/`。
+1. 打开 fnOS「应用中心」→ 手动安装，选择 `strata_v<版本>_x86.fpk`。
+2. 向导里选择**数据位置**（套件私有目录，或一个共享目录）与**运行权限**（普通用户 / root）。这两项安装后不要更改。
+3. 安装完成后，点桌面图标，或直接浏览器访问 `http://<NAS 地址>:8791/`。
 
-### 安装器提示（0.2.2.2 起）
+> 数据根就是向导里选的那个库：模型与工作区位于其下的 `Documents/Strata`。选共享目录时，请确保该目录对运行用户可写（见「常见问题」）。
 
-- **模型目录属主**：GUI Setup 要对模型目录写 `.done` 完成标记。选已有的 GGUF 目录（如共享目录里的下载残留）时，目录必须**运行用户可写**——向导选「普通用户 (Package)」时运行用户是套件用户（如 `strata`），属主是 `rain`/root 的目录写不进标记，安装器每次重跑 prepare（官方行为：warn 后继续，不致命）。想省事就把模型放进数据目录 `Documents/Strata` 下或 chown 给运行用户。
-- **磁盘不够用直读**：GUI「已有文件夹」/ CLI `--gguf-dir <目录>` 支持就地直读——不复制、不重下（按官方 pin 的 size+SHA256 校验你自己的文件），磁盘只需 ~6GB 余量（prepare 输出到数据目录的 packs/）。自己的文件 setup 永不删除。
-- **无 GitHub 网络**：本构建在包内捆绑了 `gguf-py`（`control/gguf-py/` = PyPI `gguf` 0.19.0，MIT，上游即 llama.cpp 的 gguf-py；四运行时依赖 numpy/pyyaml/requests/tqdm 在 bundle venv 已齐），打包模式的 installer 不再联网拉 llama.cpp 源码 zip。要严格对齐上游 pin（commit `3cf0325`）的源码版，可用环境变量 `STRATA_LLAMA_CPP_ZIP` 指向镜像/本地 zip（download() 支持 file:// 和纯路径拷贝）。
+## 使用
 
-### 国内网络与模型下载（0.2.2.3 起）
+### 首次启动
 
-- 本机（及国内多数网络）直连 `huggingface.co` 不通，GUI 里点下载模型/图片读取依赖会报 `cannot reach huggingface.co`。
-- 包内 `cmd/main` 已默认注入 `export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"`（hf-mirror 实测可达，约 150KB/s）。**不要**默认改 `STRATA_SOURCE=modelscope`：setup.py 的 `model_source()` 明确说 ModelScope 只给仓库当前文件、丢了 pinned revision，大分片有 sha 不符被删的风险。
-- 最省事是**预置文件零下载**：把与 pinned 同名的 gguf/mmproj 放进 `<models-dir>/<tag><size>/` 并保留 `.done` 标记（内含 `sha256 <hex>`，必须与 pinned 值一致），setup 命中标记即跳过下载与重复哈希。标记必须配合真实文件与真实 sha256，不要为过校验伪造。
-- 下载失败时 GUI 的错误信息会自动附带上述两条出路的中文引导（本包补丁，`host/server/native-control.mjs` 的 `downloadHint()`）。
+打开页面后会出现 Setup 向导，依次是：欢迎 → 选择模型 → 准备文件 → 完成。首次准备会把模型转成引擎使用的格式，耗时取决于模型大小与磁盘速度。
 
-### STRATA_REAL_ENGINE 语义（易踩，写清楚）
+### 选择模型目录
 
-- **装机默认不设 `STRATA_REAL_ENGINE`**（即 simulated/demo 模式）时，GUI 的「Load model」走官方 native runtime，直接拉起包内 strata engine，**能真加载真答话**（实测双卡 2080Ti：各 21.7G、context 131072、70 tok/s）。
-- 设了 `STRATA_REAL_ENGINE=1` 反而走 llama-server 路径（`host/server/index.mjs` 里 `models.REAL` 分支需 `supervisor.findBinary()` 的 llama-server 二进制），本包没有该二进制 → GUI 点加载会秒报 `stopped while starting`。**别设它。**
-- 之前文档里「默认 simulated 模拟模式」的说法指的是后端 `kind:"demo"` 的标签，不代表加载是假的——模型加载与推理都是真的。
+- **官方目录**：默认在数据根 `Documents/Strata` 下，Setup 会在此安装与整理模型。
+- **已有模型**：向导的「Other local models…」可以指向任意目录里已有的 GGUF，就地读取，不复制。
 
-### 装机后安装/加载卡死（0.2.2.4 修）
+### 自备 GGUF 模型
 
-- **数据根属主**：装机版数据根常是用户选的共享目录（如 `/vol1/1000`，属主 `rain:root` 755），应用用户（如 `strata` uid 961）建不了 `packs/`、`mtp/` → 官方 `iq_pack.py` 直接 `PermissionError: [Errno 13] Permission denied: '/vol1/1000/packs'`（或 `mtp_fetch.py` 的 `lock_folder` 报 `/vol1/1000/mtp`）。本包 `cmd/main` 启动时以 root 预建 `<数据根>/models`、`packs`、`mtp` 并 `chown` 给运行用户（目录换属主时递归一次），再校验可写。
-- **可写性预检**：安装前 `host/server/native-control.mjs` 的 `dataRootProblem()` 先探 `packs/`、`mtp/` 能否写，不能写就直接返回中文提示（「数据根 … 对应用用户不可写（EACCES）…请到 设置 → 模型文件夹 换一个应用能写的目录」），不再冒 Python 堆栈。
-- **MTP 复用优先**（补丁存档 `patches/control-setup-mtp-reuse.md`，`control/` 不进 git 需重放）：`control/setup.py` 的 `reuse_local_mtp()` 在下载前先找 `<数据根>/models/mtp` 与历史安装目录的 `mtp/`、`models/mtp/`，有成品就整棵树复用（同盘硬链接零拷贝），`mtp_pack`/`mtp_rt` 也只在缺产物时才跑——本机不通 huggingface 时靠这条活下来。
-- **旧失败卡自动清**：一次安装成功后，同 kind 的历史失败任务从 `native-jobs.json` 里移除（界面不再挂着 10-22 那张「下载无法连接到互联网」红卡）。
-- **`su -c` 会重置 HOME**：`cmd/main` 用 `su -s /bin/bash <用户> -c` 起 host 时，su 把 `HOME` 换成应用用户的家目录（装机环境常不存在）→ `store.mjs` 报 `No writable data directory found`。现在在 su 内再 `export HOME=<数据目录>` 一次。
+想把已经下载好的 GGUF（包括自行合并或改名的版本）交给 Strata 使用，遵守三条：
 
-### 局域网访问与「打开本地 Strata 应用以使用主机控件」
+1. **文件名必须与上游一致。** 识别完全按文件名匹配，例如
+   `Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf`、`-00002-of-00002.gguf`，
+   以及配套的 `mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf`。名字多出任何字样都不会被识别。
+   如果实际文件名字不同，用**硬链接**改成官方名即可（同一磁盘零额外占用），不要复制几十 GB：
 
-官方 host 只放行 `Origin` 为 localhost/127.0.0.1/[::1] 的 `/api/*` 请求，其它来源一律 403 并回这句提示。fnOS 装机版没有桌面宿主外壳，用户就是从 `http://<NAS 局域网 IP>:8791` 打开的，于是所有 API 被 403。本包把**本机全部网卡地址与主机名**加入放行名单（`host/server/index.mjs` 的 `isLocalOrigin()`），外网域名仍然拦。
+   ```sh
+   ln "<你的文件>.gguf" "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf"
+   ```
 
-### 自带 GGUF 安装（改版 / 破甲权重）
+2. **目录位置不能放在 `<数据根>/models/` 下面。** 该路径是官方安装布局的判定区，放进去会被误认为官方安装目录，
+   之后在页面里改设置并重新加载时会退回官方下载。放到其它位置（例如数据根之外的独立目录）再在向导里指过去。
 
-- **目录位置有陷阱：不要放在 `<数据根>/models/` 下面。** `host/server/native-control.mjs` 的 `installedInfo()` 用
-  `basename(dirname(dirname(nativeFile))) === 'models'` 判断这是不是官方安装布局；放在 `<data_dir>/models/<任意名>/` 里
-  都会被当成官方目录 → `ownGgufDir` 变空 → 以后在界面点「Apply settings and load」重跑 setup 时**不带 `gguf_dir`**，
-  直接走官方下载（一个 84 GB 的坑，磁盘不够就挂）。放 `/vol1/1000/local-models/<你起的名字>/` 这类目录才安全，
-  装完 `GET /api/native` 的 `installed.models[].ownGgufDir` 必须等于它。
-- **文件名必须是官方全名。** `setup.py` 的 `gguf_choice()` 按 `model_file()` 拼出的完整文件名匹配，例如
-  `Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf` 与 `-00002-of-00002.gguf`、`mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf`。
-  破甲/改版权重通常叫 `...-abliterated-IQ3_S-...gguf`，**用 `ln` 硬链接成官方名**（同盘零占用，别复制 80+ GB）。
-- **不要伪造 `.done`。** `.done` 里写的是官方 pinned 的 sha256；本包 0003 补丁已让 `own=True` 时尺寸/SHA 不符只 `warn` 不中止
-  （官方原版是 `fail` 中止，所以自带权重在官方包里必挂）。
-- **选完目录后返回 `ownGgufDir` 才算对**，否则重装会退回官方下载路径。
+3. **不要手工伪造 `.done` 标记。** `.done` 里记录的是上游发布的 sha256；预置文件时标记必须与真实文件、真实哈希一致。
+   标记与内容对不上的文件，在后续校验中会被判为不完整。
 
-### 常见故障
+正确指向后，页面的模型信息里会显示该模型来自本地目录（`ownGgufDir` 非空）；若为空，说明路径被当成了官方布局，请换目录重选。
 
-- **GUI 里发消息报「The coding assistant could not start」**：host 内嵌的 Harness 进程起不来，最常见原因是凭据文件权限过宽——`<数据根>/.strata/data/agent/home/.credentials.yaml` 要求 owner-only（600），实际为 755 时 harness 的 `credentials` 插件拒绝加载，连带 11 个依赖插件等待。修法：`chmod 600 <数据根>/.strata/data/agent/home/.credentials.yaml` 后重发消息即可（不用重启 app）。诊断日志：`<数据根>/.strata/data/agent/home/logs/startup-*.log`。
-- **GUI 点加载模型秒报 `stopped while starting`**：见上面「STRATA_REAL_ENGINE 语义」——别设 `STRATA_REAL_ENGINE=1`。
-- **下载模型报 `cannot reach huggingface.co`**：见上面「国内网络与模型下载」。
+### 加载模型
+
+在模型页面点加载即可，加载与推理都是真实执行（不是演示模式）。首次加载会按显存情况分配层与上下文，双卡机器会自动分摊。
+
+> **不要设置环境变量 `STRATA_REAL_ENGINE=1`。** 该变量会让加载器转而寻找一个随包并未分发的 llama-server 二进制，结果是点击加载后立刻失败（`stopped while starting`）。保持默认即可。
+
+## 常见问题
+
+**安装时提示数据目录不可写 / 准备模型时报 `Permission denied`**
+向导里选的共享目录属主不是运行用户时，Strata 无法在其中创建 `packs/`、`mtp/` 等目录。做法二选一：改选一个运行用户能写的目录，或把该目录属主交给运行用户后重启应用。新版本启动时会预建这些目录并尝试交付属主，若仍失败会给出明确提示。
+
+**下载模型报 `cannot reach huggingface.co`**
+国内网络通常无法直连 huggingface.co。本包已默认把下载端点指向 hf-mirror 镜像；若镜像也不可达，最稳的办法是**在别处下好文件再放进来**：文件名与上游一致，放进 `<模型目录>/<模型标签>/`，并保留与真实内容一致的 `.done` 标记。
+
+不建议把下载源改成 ModelScope：它只提供仓库当前版本文件，丢失了上游固定的版本校验，大分片可能因哈希不符被删。
+
+**从局域网 IP 打开，页面能显示但操作报「Open the local Strata app to use host controls」**
+旧版本只放行 `localhost` 来源的接口请求。本包已把服务器自身的全部网卡地址与主机名加入放行名单，外网域名仍然拦截。若仍遇到，请确认访问地址是 NAS 自身的 IP 或主机名。
+
+**对话框报「The coding assistant could not start」**
+内嵌助手启动失败，最常见原因是凭据文件权限过宽。把它改成仅所有者可读写即可，无需重启应用：
+
+```sh
+chmod 600 "<数据根>/.strata/data/agent/home/.credentials.yaml"
+```
+
+排查日志在 `<数据根>/.strata/data/agent/home/logs/startup-*.log`。
+
+**点加载模型后立刻报 `stopped while starting`**
+见上文「加载模型」：不要设置 `STRATA_REAL_ENGINE=1`。
+
+## 构建
+
+```sh
+scripts/build.sh
+```
+
+产物在 `dist/strata_v<版本>_x86.fpk`。构建脚本会打包 `fnpack/` 下的应用树、注入版本号，并做一次隐私检查（构建机路径与自产文件不得进包）。
+
+`control/` 目录不纳入版本管理（体积大且来自上游），从官方 AppImage 解包后按 `patches/` 下的记录重放少量兼容性补丁，再执行构建。
 
 ## 版本
 
-`VERSION` 文件 = 上游版本.构建号。
-- **0.2.2.5（本次）**：自带 GGUF / 改版权重支持收口——① 纳入 0003 补丁（`verify_sha256(own=True)` 尺寸或 SHA 不符只 warn 不中止）；② `gguf_dir_problem()` 提示人话化（直说文件名必须等于官方全名，并提示用 `ln` 硬链改名）；③ README 写明自带 GGUF 目录不能放 `<数据根>/models/` 下；④ 新增 `patches/README.md` 补丁重放清单（0001 MTP 复用 / 0002 提示人话 / 0003 own 宽容）。
-- **0.2.2.4**：装机链路修复——① `cmd/main` 启动时预建数据根下的 `models`/`packs`/`mtp` 并交付运行用户，装上再也不在 Step 6/7 撞 `PermissionError`；② 安装前数据根可写性预检 + 中文提示；③ MTP 层本地复用优先（零下载）；④ 安装成功清旧失败卡；⑤ 局域网 IP 访问不再被 403（Origin 白名单含本机网卡地址）；⑥ `native-host.json` 的 repo 残留路径自动校正。load/推理链路未改动。
-- **0.2.2.3**：去壳重构——删 fnshell 壳与 python312 依赖，单进程原生直跑（STRATA_BIND=0.0.0.0、STRATA_PORT=8791 不变）；桌面图标改端口直达（不占统一网关前缀）；manifest 加 service_port/checkport（照官方 Cloudrive2 包形态）。v0.2.2.2 包被本构建取代，请直接装 0.2.2.3。
-- **0.2.2.2**：fork 补丁——① installer 打包模式免 GitHub 下载（捆绑 gguf-py + `STRATA_LLAMA_CPP_ZIP` 镜像变量）；② wizard/文档写明模型目录属主要求与 `--gguf-dir` 直读。
-- 0.2.2.1（首个构建，内容=官方 AppImage `Strata-0.2.2-linux-nvidia-cuda12` 解包，SHA256 `7506fd9e…fd539` 校验通过）。
+- **0.2.2.5**：可以放心使用自己下载或改名的 GGUF 模型——文件名提示更明确，文件内容与上游发布值不一致时只提示不中断。
+- **0.2.2.4**：修复安装向导在共享目录上因权限失败的问题；局域网 IP 访问不再被拒绝；已有模型文件准备阶段优先复用本地副本，不再重复下载；安装成功后自动清理早先的失败记录。
+- **0.2.2.3**：改为单进程原生直跑，去掉中间层，端口与图标行为不变；安装包体积更小。
+- **0.2.2.2**：安装阶段不再依赖外部网络下载源码；文档补充模型目录权限与就地读取说明。
+- **0.2.2.1**：首个构建，内容为官方 AppImage（CUDA 12 版）完整解包。
+
+## 许可证与致谢
+
+本打包版遵循上游 [Strata](https://github.com/Niko1221/Strata) 的 MIT 协议。Strata 及其引擎的版权归上游作者所有，此仓库仅提供面向 fnOS 的打包与少量兼容性适配。
