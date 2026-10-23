@@ -20,6 +20,25 @@ fnOS 应用中心 → 手动安装 fpk。向导选数据位置与运行权限（
 - **磁盘不够用直读**：GUI「已有文件夹」/ CLI `--gguf-dir <目录>` 支持就地直读——不复制、不重下（按官方 pin 的 size+SHA256 校验你自己的文件），磁盘只需 ~6GB 余量（prepare 输出到数据目录的 packs/）。自己的文件 setup 永不删除。
 - **无 GitHub 网络**：本构建在包内捆绑了 `gguf-py`（`control/gguf-py/` = PyPI `gguf` 0.19.0，MIT，上游即 llama.cpp 的 gguf-py；四运行时依赖 numpy/pyyaml/requests/tqdm 在 bundle venv 已齐），打包模式的 installer 不再联网拉 llama.cpp 源码 zip。要严格对齐上游 pin（commit `3cf0325`）的源码版，可用环境变量 `STRATA_LLAMA_CPP_ZIP` 指向镜像/本地 zip（download() 支持 file:// 和纯路径拷贝）。
 
+### 国内网络与模型下载（0.2.2.3 起）
+
+- 本机（及国内多数网络）直连 `huggingface.co` 不通，GUI 里点下载模型/图片读取依赖会报 `cannot reach huggingface.co`。
+- 包内 `cmd/main` 已默认注入 `export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"`（hf-mirror 实测可达，约 150KB/s）。**不要**默认改 `STRATA_SOURCE=modelscope`：setup.py 的 `model_source()` 明确说 ModelScope 只给仓库当前文件、丢了 pinned revision，大分片有 sha 不符被删的风险。
+- 最省事是**预置文件零下载**：把与 pinned 同名的 gguf/mmproj 放进 `<models-dir>/<tag><size>/` 并保留 `.done` 标记（内含 `sha256 <hex>`，必须与 pinned 值一致），setup 命中标记即跳过下载与重复哈希。标记必须配合真实文件与真实 sha256，不要为过校验伪造。
+- 下载失败时 GUI 的错误信息会自动附带上述两条出路的中文引导（本包补丁，`host/server/native-control.mjs` 的 `downloadHint()`）。
+
+### STRATA_REAL_ENGINE 语义（易踩，写清楚）
+
+- **装机默认不设 `STRATA_REAL_ENGINE`**（即 simulated/demo 模式）时，GUI 的「Load model」走官方 native runtime，直接拉起包内 strata engine，**能真加载真答话**（实测双卡 2080Ti：各 21.7G、context 131072、70 tok/s）。
+- 设了 `STRATA_REAL_ENGINE=1` 反而走 llama-server 路径（`host/server/index.mjs` 里 `models.REAL` 分支需 `supervisor.findBinary()` 的 llama-server 二进制），本包没有该二进制 → GUI 点加载会秒报 `stopped while starting`。**别设它。**
+- 之前文档里「默认 simulated 模拟模式」的说法指的是后端 `kind:"demo"` 的标签，不代表加载是假的——模型加载与推理都是真的。
+
+### 常见故障
+
+- **GUI 里发消息报「The coding assistant could not start」**：host 内嵌的 Harness 进程起不来，最常见原因是凭据文件权限过宽——`<数据根>/.strata/data/agent/home/.credentials.yaml` 要求 owner-only（600），实际为 755 时 harness 的 `credentials` 插件拒绝加载，连带 11 个依赖插件等待。修法：`chmod 600 <数据根>/.strata/data/agent/home/.credentials.yaml` 后重发消息即可（不用重启 app）。诊断日志：`<数据根>/.strata/data/agent/home/logs/startup-*.log`。
+- **GUI 点加载模型秒报 `stopped while starting`**：见上面「STRATA_REAL_ENGINE 语义」——别设 `STRATA_REAL_ENGINE=1`。
+- **下载模型报 `cannot reach huggingface.co`**：见上面「国内网络与模型下载」。
+
 ## 版本
 
 `VERSION` 文件 = 上游版本.构建号。

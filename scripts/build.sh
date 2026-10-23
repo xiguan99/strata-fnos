@@ -1,6 +1,7 @@
 #!/bin/bash
 # strata-fnos 构建脚本（照 qwenpaw-fnos 版式）
-# 流程: 树内容=官方 AppImage 解包（node/host/control/harness/engine-bundle，已入库）→ 注入 fnshell/图标 → 隐私扫描 → fnpack 出 .fpk
+# 流程: 树内容=官方 AppImage 解包（node/host/control/harness/engine-bundle，已入库）→ 生成图标 → 隐私扫描 → fnpack 出 .fpk
+# v0.2.2.3 起无壳（不注入 fnshell），单进程原生直跑官方 host
 # 运行环境: NAS 本机（ffmpeg + scripts/fnpack 二进制）
 set -euo pipefail
 

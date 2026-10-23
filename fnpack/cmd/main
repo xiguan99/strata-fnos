@@ -19,6 +19,10 @@ DATA_DIR="${DATA_LIBRARY_PATH}/data"
 NODE="${APP_DIR}/node/node"
 
 export HOME="${DATA_DIR}"
+# 模型/视觉依赖下载走国内可达镜像（本机直连 huggingface.co 不通，实测 hf-mirror 可达；
+# 也可临时改 STRATA_SOURCE=modelscope 走 ModelScope，但那边是仓库当前文件、丢了 pinned 版本校验）
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+
 export STRATA_PORT="8791"           # 对外端口（原生绑定，桌面图标端口直达）
 export STRATA_BIND="0.0.0.0"
 
