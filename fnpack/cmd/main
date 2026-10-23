@@ -46,12 +46,50 @@ status() {
     return 1
 }
 
+# 装机首个模型前，官方的 setup 会在数据根下建 packs/ 与 mtp/（iq_pack.py、mtp_fetch.py 直接写）。
+# 数据根常是用户在设置里选的共享目录（例如 /vol1/1000，属主可能是别的账号），应用用户建不了就在
+# Python 里抛 PermissionError。这里以 root 先把同级目录建好并把属主交给应用用户，app 侧只做可写预检。
+prepare_data_dirs() {
+    settings="${DATA_DIR}/.local/share/strata/app-settings.json"
+    roots="${DATA_DIR}"
+    if [ -f "${settings}" ]; then
+        chosen=$(sed -n 's/.*"data_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${settings}" | head -n 1)
+        [ -n "${chosen}" ] && [ "${chosen}" != "${DATA_DIR}" ] && roots="${roots} ${chosen}"
+    fi
+    for root in ${roots}; do
+        [ -d "${root}" ] || continue
+        for item in models packs mtp; do
+            target="${root}/${item}"
+            if [ ! -d "${target}" ]; then
+                mkdir -p "${target}" 2>/dev/null || { log_err "数据根 ${root} 下建不了 ${item}/（可写性不足），安装首个模型前请在 Strata 设置里换模型文件夹"; continue; }
+            fi
+            owner=$(stat -c '%U' "${target}" 2>/dev/null)
+            if [ "${RUN_USER}" != "root" ] && id "${RUN_USER}" >/dev/null 2>&1; then
+                if [ "${owner}" != "${RUN_USER}" ]; then
+                    chown -R "${RUN_USER}:$(id -gn "${RUN_USER}" 2>/dev/null)" "${target}" 2>/dev/null || log_err "改不了 ${target} 的属主（需要 root）"
+                fi
+                chmod u+rwx,g+rwx "${target}" 2>/dev/null
+            fi
+            writable=1
+            if [ "${RUN_USER}" != "root" ] && id "${RUN_USER}" >/dev/null 2>&1; then
+                as_run_user "test -w '${target}'" || writable=0
+            else
+                [ -w "${target}" ] || writable=0
+            fi
+            [ "${writable}" = "1" ] || log_err "数据目录 ${target} 对应用用户 ${RUN_USER} 不可写：安装/加载会失败，请在 Strata 设置里换一个模型文件夹"
+        done
+    done
+}
+
 start_backend() {
     status && return 0
+    prepare_data_dirs
     [ -x "${NODE}" ] || { log_err "找不到 ${NODE}"; return 1; }
     [ -d "${APP_DIR}/host/dist" ] || { log_err "找不到 ${APP_DIR}/host/dist"; return 1; }
     log_msg "启动 strata host (端口=${STRATA_PORT}, 绑定=${STRATA_BIND}, USER=${RUN_USER}, DATA=${DATA_DIR})"
-    as_run_user "cd '${APP_DIR}/host' && exec '${NODE}' server/index.mjs --dist dist >> '${LOG_FILE}' 2>&1 & echo \$!" &
+    # HOME 必须在 as_run_user 的 shell 里再 export 一次：su -c 会把 HOME 重置成应用用户的家目录（装机环境里
+    # 那个目录往往不存在），host 的 store.mjs 会因找不到可写数据目录直接退出。
+    as_run_user "cd '${APP_DIR}/host' && export HOME='${DATA_DIR}' && exec '${NODE}' server/index.mjs --dist dist >> '${LOG_FILE}' 2>&1 & echo \$!" &
     pid=$!
     sleep 3
     if ! check_process "${pid}"; then

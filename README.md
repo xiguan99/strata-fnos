@@ -33,6 +33,18 @@ fnOS 应用中心 → 手动安装 fpk。向导选数据位置与运行权限（
 - 设了 `STRATA_REAL_ENGINE=1` 反而走 llama-server 路径（`host/server/index.mjs` 里 `models.REAL` 分支需 `supervisor.findBinary()` 的 llama-server 二进制），本包没有该二进制 → GUI 点加载会秒报 `stopped while starting`。**别设它。**
 - 之前文档里「默认 simulated 模拟模式」的说法指的是后端 `kind:"demo"` 的标签，不代表加载是假的——模型加载与推理都是真的。
 
+### 装机后安装/加载卡死（0.2.2.4 修）
+
+- **数据根属主**：装机版数据根常是用户选的共享目录（如 `/vol1/1000`，属主 `rain:root` 755），应用用户（如 `strata` uid 961）建不了 `packs/`、`mtp/` → 官方 `iq_pack.py` 直接 `PermissionError: [Errno 13] Permission denied: '/vol1/1000/packs'`（或 `mtp_fetch.py` 的 `lock_folder` 报 `/vol1/1000/mtp`）。本包 `cmd/main` 启动时以 root 预建 `<数据根>/models`、`packs`、`mtp` 并 `chown` 给运行用户（目录换属主时递归一次），再校验可写。
+- **可写性预检**：安装前 `host/server/native-control.mjs` 的 `dataRootProblem()` 先探 `packs/`、`mtp/` 能否写，不能写就直接返回中文提示（「数据根 … 对应用用户不可写（EACCES）…请到 设置 → 模型文件夹 换一个应用能写的目录」），不再冒 Python 堆栈。
+- **MTP 复用优先**（补丁存档 `patches/control-setup-mtp-reuse.md`，`control/` 不进 git 需重放）：`control/setup.py` 的 `reuse_local_mtp()` 在下载前先找 `<数据根>/models/mtp` 与历史安装目录的 `mtp/`、`models/mtp/`，有成品就整棵树复用（同盘硬链接零拷贝），`mtp_pack`/`mtp_rt` 也只在缺产物时才跑——本机不通 huggingface 时靠这条活下来。
+- **旧失败卡自动清**：一次安装成功后，同 kind 的历史失败任务从 `native-jobs.json` 里移除（界面不再挂着 10-22 那张「下载无法连接到互联网」红卡）。
+- **`su -c` 会重置 HOME**：`cmd/main` 用 `su -s /bin/bash <用户> -c` 起 host 时，su 把 `HOME` 换成应用用户的家目录（装机环境常不存在）→ `store.mjs` 报 `No writable data directory found`。现在在 su 内再 `export HOME=<数据目录>` 一次。
+
+### 局域网访问与「打开本地 Strata 应用以使用主机控件」
+
+官方 host 只放行 `Origin` 为 localhost/127.0.0.1/[::1] 的 `/api/*` 请求，其它来源一律 403 并回这句提示。fnOS 装机版没有桌面宿主外壳，用户就是从 `http://<NAS 局域网 IP>:8791` 打开的，于是所有 API 被 403。本包把**本机全部网卡地址与主机名**加入放行名单（`host/server/index.mjs` 的 `isLocalOrigin()`），外网域名仍然拦。
+
 ### 常见故障
 
 - **GUI 里发消息报「The coding assistant could not start」**：host 内嵌的 Harness 进程起不来，最常见原因是凭据文件权限过宽——`<数据根>/.strata/data/agent/home/.credentials.yaml` 要求 owner-only（600），实际为 755 时 harness 的 `credentials` 插件拒绝加载，连带 11 个依赖插件等待。修法：`chmod 600 <数据根>/.strata/data/agent/home/.credentials.yaml` 后重发消息即可（不用重启 app）。诊断日志：`<数据根>/.strata/data/agent/home/logs/startup-*.log`。
@@ -42,6 +54,7 @@ fnOS 应用中心 → 手动安装 fpk。向导选数据位置与运行权限（
 ## 版本
 
 `VERSION` 文件 = 上游版本.构建号。
-- **0.2.2.3（本次）**：去壳重构——删 fnshell 壳与 python312 依赖，单进程原生直跑（STRATA_BIND=0.0.0.0、STRATA_PORT=8791 不变）；桌面图标改端口直达（不占统一网关前缀）；manifest 加 service_port/checkport（照官方 Cloudrive2 包形态）。v0.2.2.2 包被本构建取代，请直接装 0.2.2.3。
+- **0.2.2.4（本次）**：装机链路修复——① `cmd/main` 启动时预建数据根下的 `models`/`packs`/`mtp` 并交付运行用户，装上再也不在 Step 6/7 撞 `PermissionError`；② 安装前数据根可写性预检 + 中文提示；③ MTP 层本地复用优先（零下载）；④ 安装成功清旧失败卡；⑤ 局域网 IP 访问不再被 403（Origin 白名单含本机网卡地址）；⑥ `native-host.json` 的 repo 残留路径自动校正。load/推理链路未改动。
+- **0.2.2.3**：去壳重构——删 fnshell 壳与 python312 依赖，单进程原生直跑（STRATA_BIND=0.0.0.0、STRATA_PORT=8791 不变）；桌面图标改端口直达（不占统一网关前缀）；manifest 加 service_port/checkport（照官方 Cloudrive2 包形态）。v0.2.2.2 包被本构建取代，请直接装 0.2.2.3。
 - **0.2.2.2**：fork 补丁——① installer 打包模式免 GitHub 下载（捆绑 gguf-py + `STRATA_LLAMA_CPP_ZIP` 镜像变量）；② wizard/文档写明模型目录属主要求与 `--gguf-dir` 直读。
 - 0.2.2.1（首个构建，内容=官方 AppImage `Strata-0.2.2-linux-nvidia-cuda12` 解包，SHA256 `7506fd9e…fd539` 校验通过）。

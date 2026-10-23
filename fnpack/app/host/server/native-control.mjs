@@ -42,6 +42,9 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
     comes from the component folder, and a start is `strata runtime start` under the owner runtime. Nothing is installed,
     updated or fetched from here. Without `control` (a source checkout) every path below is the original one. */
  const packaged=!!control;
+ /* 装过一版的老设置里 repo 可能是模板残留（例如 /vol1/@appcenter/Strata，实际目录是小写 strata）：
+    packaged 模式用的是 installRoot()，但这个字段还会显示给人和写进界面，路径不存在时校正一次。 */
+ if(packaged&&typeof preferences.repo==='string'&&preferences.repo&&!existsSync(preferences.repo)&&defaultRepo&&existsSync(defaultRepo))preferences={...preferences,repo:defaultRepo};try{writeFileSync(settingsPath,JSON.stringify(preferences,null,2),{mode:0o600});}catch{/* 写不了也不影响运行 */}
  /* The auto-tuner and the saved tunings are Strata Control's (`strata tune auto`, `strata presets`): the app runs them and follows their status file. */
  const autotuner=createAutoTune({spawnProcess,workDir:join(directory,'native-tune'),launcher:()=>{if(packaged)return {command:control.control.python,prefix:[control.control.cli],cwd:control.control.dir,env:controlEnvironment(control.control)};const py=python();return {command:py.command,prefix:[...py.args,join(repo(),'strata.py')],cwd:repo(),env:{...process.env,PYTHONUNBUFFERED:'1',PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8'}};}});
  /* In the packaged app the model catalog, the GPU probe and the install job are Control's bundled tools/strata_mcp.py and
@@ -147,9 +150,32 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
  /* 国内网络引导（本包补丁 strata-fnos）：直连 huggingface.co 不通时，把两条实际可行的出路写进失败提示——
     ① HF_ENDPOINT 镜像（hf-mirror.com，实测可达）；② 预置同名文件 + 含 sha256 的 .done 标记，setup 零下载通过校验。 */
  function downloadHint(message){const text=String(message??'');if(!/huggingface|Network is unreachable|urlopen|timed out|Timeout|Could not resolve|Connection|SSL|EOF|Max retries/i.test(text))return text;const NL=String.fromCharCode(10);return `${text}${NL}${NL}提示（国内网络）：① 设置环境变量 HF_ENDPOINT=https://hf-mirror.com 后重试（走镜像下载）；② 或把与 pinned 同名的 gguf/mmproj 放进 <models-dir>/<tag><size>/ 并保留含 "sha256 <hex>" 的 .done 标记，setup 会零下载通过校验（标记必须配合真实文件与真实 sha256，不要为过校验伪造标记）。`;}
- function begin(kind,run,metadata={}){if([...jobs.values()].some(j=>j.state==='running'))throw new Error('Finish or cancel the current engine operation first.');const job={id:randomUUID(),kind,state:'running',startedAt:new Date().toISOString(),summary:'Starting…',result:null,error:null,...metadata};for(const [id,old] of jobs)if(jobs.size>=12&&old.state!=='running')jobs.delete(id);jobs.set(job.id,job);emit();void run(job).then(result=>{if(job.state==='running'){Object.assign(job,{state:'done',summary:result?.summary??'Complete',result,finishedAt:new Date().toISOString()});}}).catch(error=>{if(job.state==='running')Object.assign(job,{state:'error',error:error.message,summary:error.message,...(error.details?{details:error.details}:{}),finishedAt:new Date().toISOString()});}).finally(()=>{if(job.kind.startsWith('update')||job.kind==='rollback')disconnect();lastRead=0;emit();void refresh(true);});return state().jobs.find(j=>j.id===job.id);}
+ function begin(kind,run,metadata={}){if([...jobs.values()].some(j=>j.state==='running'))throw new Error('Finish or cancel the current engine operation first.');const job={id:randomUUID(),kind,state:'running',startedAt:new Date().toISOString(),summary:'Starting…',result:null,error:null,...metadata};for(const [id,old] of jobs)if(jobs.size>=12&&old.state!=='running')jobs.delete(id);jobs.set(job.id,job);emit();void run(job).then(result=>{if(job.state==='running'){Object.assign(job,{state:'done',summary:result?.summary??'Complete',result,finishedAt:new Date().toISOString()});
+ /* 一次安装成功后，之前失败的安装卡（旧数据根不可写、下载不通等）不再代表现在的状态：清掉，免得界面一直挂着一张旧红卡 */
+ if(job.kind==='install')for(const [other,failed] of jobs)if(other!==job.id&&failed.kind==='install'&&failed.state!=='running')jobs.delete(other);}}).catch(error=>{if(job.state==='running')Object.assign(job,{state:'error',error:error.message,summary:error.message,...(error.details?{details:error.details}:{}),finishedAt:new Date().toISOString()});}).finally(()=>{if(job.kind.startsWith('update')||job.kind==='rollback')disconnect();lastRead=0;emit();void refresh(true);});return state().jobs.find(j=>j.id===job.id);}
  async function watchInstall(job,current){job.summary=current.step??'Resuming preparation status…';job.result={install:current};while(job.state==='running'){await new Promise(r=>setTimeout(r,1500));const result=await tool('strata_install');job.summary=result.summary;job.result=result;emit();if(!result.install?.running){if(result.install?.exit_code!==0)throw new Error(downloadHint(result.install?.error??'Preparation did not finish. Retry to reuse completed files.'));return {summary:'Model preparation complete. Load it from Models.'};}}}
  function externalRunning(){return Array.isArray(snapshot.external)?snapshot.external.filter(s=>![...instances.values()].some(i=>i.port===s.port)):[];}
+/* 数据根可写性预检：装机时用户选的数据根可能是别的账号的目录（例如 /vol1/1000 属 rain），
+   应用用户写不进去时 iq_pack.py / mtp_fetch.py 会直接抛 Python 堆栈；这里在动工前先给人话中文提示，
+   并说明出路（换一个应用可写的模型文件夹）。 */
+function dataRootProblem(folder){
+  if(typeof folder!=='string'||!folder)return null;
+  for(const dir of [join(folder,'packs'),join(folder,'mtp')]){
+    let probe=null;
+    try{
+      mkdirSync(dir,{recursive:true});
+      probe=join(dir,`.write-probe-${process.pid}`);
+      writeFileSync(probe,'probe');
+    }catch(error){
+      const code=error?.code??error?.message??'';
+      return `数据根 ${folder} 对应用用户不可写（${code}）：准备模型文件时会在 ${dir} 处失败。请到 设置 → 模型文件夹 换一个应用能写的目录（你有写权限的共享目录或应用数据目录），再重新安装。`;
+    }finally{
+      if(probe)try{unlinkSync(probe);}catch{/* 预检文件删不掉不影响结果 */}
+    }
+  }
+  return null;
+}
+
  async function install(job,args){
   if(ready)await ready.catch(()=>{});
   if(job.state!=='running')return;
@@ -157,7 +183,11 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
   if(busy(requests().filter(r=>instances.has(r.instanceId))))throw new Error('Finish or cancel requests before preparing model files.');
   for(const id of [...instances.keys()])await unload(id);
   if(job.state!=='running')return;
-  let result=await tool('strata_install',installArgs(args,true));
+  const preparedArgs=installArgs(args,true);
+  /* 先确认数据根能写：packs/ 与 mtp/ 由 setup 的同级工具直接创建，写不了时先给人话提示，而不是让 Python 堆栈冒出来。 */
+  const unwritable=dataRootProblem(preparedArgs.data_dir??preferences.downloadDirectory??snapshot.installed?.data_folder);
+  if(unwritable)throw new Error(unwritable);
+  let result=await tool('strata_install',preparedArgs);
   /* The engine comes with the model: the same job makes sure this PC has a usable engine (none installed, or a newer compatible
      one in the signed feed) through Control's component updater, and shows it in the job's own progress (install.engine, install.parts,
      one combined download total). A failed engine download keeps the model files and ends with a retry message. */

@@ -28,7 +28,7 @@ import { findBrowser, findPlaywrightMcp } from './agent/browser-probe.mjs';
  * live metrics and the local inference API. No runtime dependencies.
  */
 import http from 'node:http';
-import { homedir } from 'node:os';
+import { homedir, hostname as osHostname, networkInterfaces } from 'node:os';
 import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
@@ -138,7 +138,7 @@ if (control) {
     return answer && !answer.usable && bundledWrongMake ? { ...answer, notice: bundledWrongMake, wrongMake: true } : answer;
   };
 }
-const native=createNativeControl({control,ready:bundledEngine,appUpdater,hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
+const native=createNativeControl({control,ready:bundledEngine,appUpdater,defaultRepo:process.env.STRATA_NATIVE_REPO??resolve(ROOT,'..'),hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
 /* The agent: chats become DeepSeek Harness sessions when that component is installed. It is a separate
    pinned component (STRATA_HARNESS_DIR), not part of this host, so its absence is a visible capability
    state and the chat falls back to the direct path with a notice, never silently to another model. */
@@ -921,6 +921,29 @@ await cloudflare.inspect();
 
 /* --------------------------------------------------------------- routing --- */
 
+/* host controls 的来源判定：官方只放行 localhost / 127.0.0.1 / [::1]。fnOS 装机版没有桌面宿主外壳，
+   用户是浏览器直接开 http://<NAS 局域网 IP>:8791 —— 那种 Origin 会被判成"不是本机"，所有 /api 一律 403，
+   界面就冒出「打开本地 Strata 应用以使用主机控件」。这里把本机所有网卡地址与主机名也认作本机（局域网访问正常），
+   外网域名仍然拦在外面。 */
+const localHostNames = (() => {
+  const names = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+  const add = (v) => { if (typeof v === 'string' && v) names.add(v.toLowerCase()); };
+  add(osHostname());
+  add(`${osHostname()}.local`);
+  try {
+    for (const list of Object.values(networkInterfaces())) {
+      for (const item of list ?? []) add(item?.address);
+    }
+  } catch { /* 拿不到网卡表就只放行回环地址 */ }
+  return names;
+})();
+function isLocalOrigin(hostname) {
+  const name = String(hostname ?? '').toLowerCase().replace(/\.$/, '');
+  if (!name) return true;
+  if (localHostNames.has(name)) return true;
+  return /^127\./.test(name) || name === '::1';
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const path = url.pathname;
@@ -938,7 +961,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (path.startsWith('/api/') && req.headers.origin) {
       const origin = new URL(req.headers.origin);
-      if (!['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) return error(res, 403, 'Open the local Strata app to use host controls.');
+      if (!isLocalOrigin(origin.hostname)) return error(res, 403, 'Open the local Strata app to use host controls.');
     }
     if (path.startsWith('/api/')) {
       const modelOperation = !['GET', 'OPTIONS'].includes(method) && /^\/api\/(models|local-models|runtime|image-models|engine|native)(\/|$)/.test(path) && !['/api/runtime/plan', '/api/engine/validate', '/api/local-models/inspect'].includes(path);
