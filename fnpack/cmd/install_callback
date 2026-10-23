@@ -22,6 +22,6 @@ if [ "${RUN_USER}" != "root" ] && id "${RUN_USER}" >/dev/null 2>&1; then
 fi
 
 bash "$(dirname "$0")/main" start || { echo "启动失败，详见应用中心日志"; exit 1; }
-echo "Strata 已启动：桌面图标进入 /app/strata（经统一网关），浏览器直连 http://<NAS>:8791/"
+echo "Strata 已启动：桌面图标/浏览器端口直达 http://<NAS>:8791/"
 log_msg "install_callback 完成"
 exit 0

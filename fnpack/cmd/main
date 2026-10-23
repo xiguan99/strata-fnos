@@ -1,11 +1,9 @@
 #!/bin/bash
-# strata-fnos 生命周期入口（照 qwenpaw-fnos 版式）
-# 双进程：strata host（自带 node runtime 跑 server/index.mjs，绑内部端口）+ fnshell（direct 直通反代+桥接注入+网关 socket+API 层，监听对外端口）
-# 零宿主机依赖：node/python 均为官方 AppImage 解包自带；壳的 python 用 python312 套件
+# strata-fnos 生命周期入口（单进程原生直跑，无壳）
+# 自带 node runtime 直接跑官方 server，原生绑 0.0.0.0:8791（对外端口不变）；桌面图标端口直达，不走统一网关
+# 零宿主机依赖：node/engine 均为官方 AppImage 解包自带
 LOG_FILE="${TRIM_PKGVAR}/info.log"
-GW_LOG="${TRIM_PKGVAR}/gateway.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
-GW_PID_FILE="${TRIM_PKGVAR}/gw.pid"
 APP_DIR="${TRIM_APPDEST}"
 
 LIB_TYPE="${wizard_data_library_type:-data}"
@@ -17,16 +15,12 @@ fi
 RUN_USER="${wizard_run_user:-root}"
 DATA_DIR="${DATA_LIBRARY_PATH}/data"
 
-# 套件 PATH（守护环境不含 python312，显式解析）——仅供 fnshell 壳用
-PY_RUNTIME="/var/apps/python312/target/bin/python3"
-[ -x "${PY_RUNTIME}" ] || PY_RUNTIME="$(command -v python3 || true)"
 # 官方自带 node runtime（AppImage 解包件）
 NODE="${APP_DIR}/node/node"
 
 export HOME="${DATA_DIR}"
-export STRATA_PORT="8790"           # 本体内部端口，仅 127.0.0.1，由壳反代
-export STRATA_BIND="127.0.0.1"
-export STRATA_SHELL_PORT="8791"     # 对外端口：壳监听（浏览器直连 + 桌面图标经网关）
+export STRATA_PORT="8791"           # 对外端口（原生绑定，桌面图标端口直达）
+export STRATA_BIND="0.0.0.0"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "${LOG_FILE}"; }
 log_err() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" >> "${LOG_FILE}"; }
@@ -48,19 +42,11 @@ status() {
     return 1
 }
 
-gw_status() {
-    if [ -f "${GW_PID_FILE}" ]; then
-        pid=$(head -n 1 "${GW_PID_FILE}" | tr -d '[:space:]')
-        if check_process "${pid}"; then return 0; else rm -f "${GW_PID_FILE}"; fi
-    fi
-    return 1
-}
-
 start_backend() {
     status && return 0
     [ -x "${NODE}" ] || { log_err "找不到 ${NODE}"; return 1; }
     [ -d "${APP_DIR}/host/dist" ] || { log_err "找不到 ${APP_DIR}/host/dist"; return 1; }
-    log_msg "启动 strata host (端口=${STRATA_PORT}, USER=${RUN_USER}, DATA=${DATA_DIR})"
+    log_msg "启动 strata host (端口=${STRATA_PORT}, 绑定=${STRATA_BIND}, USER=${RUN_USER}, DATA=${DATA_DIR})"
     as_run_user "cd '${APP_DIR}/host' && exec '${NODE}' server/index.mjs --dist dist >> '${LOG_FILE}' 2>&1 & echo \$!" &
     pid=$!
     sleep 3
@@ -73,27 +59,6 @@ start_backend() {
         log_msg "strata host 启动成功 PID=${pid}"
     else
         log_err "strata host 启动失败"
-        return 1
-    fi
-}
-
-start_shell() {
-    gw_status && return 0
-    [ -x "${PY_RUNTIME}" ] || { log_err "fnshell 需要 python312 套件"; return 1; }
-    [ -f "${APP_DIR}/fnshell.py" ] || { log_err "找不到 ${APP_DIR}/fnshell.py"; return 1; }
-    log_msg "启动 fnshell (tcp ${STRATA_SHELL_PORT}, backend 127.0.0.1:${STRATA_PORT}, socket ${APP_DIR}/app.sock)"
-    as_run_user "exec '${PY_RUNTIME}' '${APP_DIR}/fnshell.py' --backend 127.0.0.1:${STRATA_PORT} --socket '${APP_DIR}/app.sock' --prefix /app/strata --tcp ${STRATA_SHELL_PORT} --direct --cmd-dir '${APP_DIR}/cmd' --github-repo xiguan99/strata-fnos >> '${GW_LOG}' 2>&1 & echo \$!" &
-    pid=$!
-    sleep 2
-    if ! check_process "${pid}"; then
-        real=$(pgrep -f "fnshell.py --backend 127.0.0.1:${STRATA_PORT} --socket" | head -1)
-        [ -n "${real}" ] && pid="${real}"
-    fi
-    if check_process "${pid}"; then
-        printf "%s" "${pid}" > "${GW_PID_FILE}"
-        log_msg "fnshell 启动成功 PID=${pid}"
-    else
-        log_err "fnshell 启动失败（见 ${GW_LOG}）"
         return 1
     fi
 }
@@ -121,15 +86,12 @@ stop_backend() {
 }
 
 start_process() {
-    start_shell || return 1
     start_backend || return 1
     return 0
 }
 
 stop_process() {
-    log_msg "停止 strata host + fnshell"
-    stop_pidfile "${PID_FILE}" "${NODE} server/index.mjs --dist dist"
-    stop_pidfile "${GW_PID_FILE}" "fnshell.py --backend 127.0.0.1:${STRATA_PORT}"
+    stop_backend
     log_msg "已停止"
     return 0
 }

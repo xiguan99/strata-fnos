@@ -3,11 +3,10 @@
     "strata.Application": {
       "title": "Strata",
       "icon": "images/icon_{0}.png",
-      "type": "iframe",
-      "protocol": "",
-      "gatewayPrefix": "/app/strata",
-      "gatewaySocket": "app.sock",
-      "url": "/app/strata",
+      "type": "url",
+      "protocol": "http",
+      "port": "8791",
+      "url": "/",
       "allUsers": true
     }
   }

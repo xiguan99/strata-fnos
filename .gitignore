@@ -5,3 +5,4 @@ dist/*.fpk
 fnpack/app/run-swift-*
 fnpack/app/strata-*.json
 fnpack/app/*.log
+scratch/

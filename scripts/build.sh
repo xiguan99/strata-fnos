@@ -13,9 +13,8 @@ echo "═══ 构建 strata v$VERSION ═══"
 
 APP="$ROOT/fnpack/app"
 
-# ── 1) 运行时树注入（壳脚本；内容主体已入库）──
-echo "[1/3] 注入 fnshell + 图标 ..."
-cp scripts/shell/fnshell.py "$APP/fnshell.py"
+# ── 1) 运行时树注入（内容主体已入库；无壳，单进程原生直跑）──
+echo "[1/3] 生成图标 ..."
 # 图标：官方源图 512×512 → 256/64（NAS 无 PIL，ffmpeg lanczos）
 SRC_ICON="$ROOT/assets/Strata.png"
 ffmpeg -y -v error -i "$SRC_ICON" -vf "scale=256:256:flags=lanczos" "$APP/ui/images/icon_256.png"
@@ -31,7 +30,7 @@ if grep -rIl -e '/vol[0-9]\+/@app\(home\|data\)/' "$APP" --exclude-dir=node_modu
   echo "✗ 疑似泄漏本机路径，中止（自行 grep 处理）"; exit 1
 fi
 # 密钥样式：只扫自产文件（上游 vendored 源码里的 token 赋值是代码，不算）
-if grep -rn -e 'sk-[A-Za-z0-9]\{20,\}' -e 'token=[A-Za-z0-9]' "$ROOT/fnpack/cmd" "$ROOT/fnpack/config" "$ROOT/fnpack/app/ui" "$ROOT/fnpack/app/fnshell.py" "$ROOT/README.md" "$ROOT/scripts/build.sh" 2>/dev/null | head -5 | grep -q .; then
+if grep -rn -e 'sk-[A-Za-z0-9]\{20,\}' -e 'token=[A-Za-z0-9]' "$ROOT/fnpack/cmd" "$ROOT/fnpack/config" "$ROOT/fnpack/app/ui" "$ROOT/README.md" "$ROOT/scripts/build.sh" 2>/dev/null | head -5 | grep -q .; then
   echo "✗ 自产文件疑似泄漏密钥，中止（自行 grep 处理）"; exit 1
 fi
 
