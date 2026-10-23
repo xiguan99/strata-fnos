@@ -45,6 +45,20 @@ fnOS 应用中心 → 手动安装 fpk。向导选数据位置与运行权限（
 
 官方 host 只放行 `Origin` 为 localhost/127.0.0.1/[::1] 的 `/api/*` 请求，其它来源一律 403 并回这句提示。fnOS 装机版没有桌面宿主外壳，用户就是从 `http://<NAS 局域网 IP>:8791` 打开的，于是所有 API 被 403。本包把**本机全部网卡地址与主机名**加入放行名单（`host/server/index.mjs` 的 `isLocalOrigin()`），外网域名仍然拦。
 
+### 自带 GGUF 安装（改版 / 破甲权重）
+
+- **目录位置有陷阱：不要放在 `<数据根>/models/` 下面。** `host/server/native-control.mjs` 的 `installedInfo()` 用
+  `basename(dirname(dirname(nativeFile))) === 'models'` 判断这是不是官方安装布局；放在 `<data_dir>/models/<任意名>/` 里
+  都会被当成官方目录 → `ownGgufDir` 变空 → 以后在界面点「Apply settings and load」重跑 setup 时**不带 `gguf_dir`**，
+  直接走官方下载（一个 84 GB 的坑，磁盘不够就挂）。放 `/vol1/1000/local-models/<你起的名字>/` 这类目录才安全，
+  装完 `GET /api/native` 的 `installed.models[].ownGgufDir` 必须等于它。
+- **文件名必须是官方全名。** `setup.py` 的 `gguf_choice()` 按 `model_file()` 拼出的完整文件名匹配，例如
+  `Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf` 与 `-00002-of-00002.gguf`、`mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf`。
+  破甲/改版权重通常叫 `...-abliterated-IQ3_S-...gguf`，**用 `ln` 硬链接成官方名**（同盘零占用，别复制 80+ GB）。
+- **不要伪造 `.done`。** `.done` 里写的是官方 pinned 的 sha256；本包 0003 补丁已让 `own=True` 时尺寸/SHA 不符只 `warn` 不中止
+  （官方原版是 `fail` 中止，所以自带权重在官方包里必挂）。
+- **选完目录后返回 `ownGgufDir` 才算对**，否则重装会退回官方下载路径。
+
 ### 常见故障
 
 - **GUI 里发消息报「The coding assistant could not start」**：host 内嵌的 Harness 进程起不来，最常见原因是凭据文件权限过宽——`<数据根>/.strata/data/agent/home/.credentials.yaml` 要求 owner-only（600），实际为 755 时 harness 的 `credentials` 插件拒绝加载，连带 11 个依赖插件等待。修法：`chmod 600 <数据根>/.strata/data/agent/home/.credentials.yaml` 后重发消息即可（不用重启 app）。诊断日志：`<数据根>/.strata/data/agent/home/logs/startup-*.log`。
@@ -54,7 +68,8 @@ fnOS 应用中心 → 手动安装 fpk。向导选数据位置与运行权限（
 ## 版本
 
 `VERSION` 文件 = 上游版本.构建号。
-- **0.2.2.4（本次）**：装机链路修复——① `cmd/main` 启动时预建数据根下的 `models`/`packs`/`mtp` 并交付运行用户，装上再也不在 Step 6/7 撞 `PermissionError`；② 安装前数据根可写性预检 + 中文提示；③ MTP 层本地复用优先（零下载）；④ 安装成功清旧失败卡；⑤ 局域网 IP 访问不再被 403（Origin 白名单含本机网卡地址）；⑥ `native-host.json` 的 repo 残留路径自动校正。load/推理链路未改动。
+- **0.2.2.5（本次）**：自带 GGUF / 改版权重支持收口——① 纳入 0003 补丁（`verify_sha256(own=True)` 尺寸或 SHA 不符只 warn 不中止）；② `gguf_dir_problem()` 提示人话化（直说文件名必须等于官方全名，并提示用 `ln` 硬链改名）；③ README 写明自带 GGUF 目录不能放 `<数据根>/models/` 下；④ 新增 `patches/README.md` 补丁重放清单（0001 MTP 复用 / 0002 提示人话 / 0003 own 宽容）。
+- **0.2.2.4**：装机链路修复——① `cmd/main` 启动时预建数据根下的 `models`/`packs`/`mtp` 并交付运行用户，装上再也不在 Step 6/7 撞 `PermissionError`；② 安装前数据根可写性预检 + 中文提示；③ MTP 层本地复用优先（零下载）；④ 安装成功清旧失败卡；⑤ 局域网 IP 访问不再被 403（Origin 白名单含本机网卡地址）；⑥ `native-host.json` 的 repo 残留路径自动校正。load/推理链路未改动。
 - **0.2.2.3**：去壳重构——删 fnshell 壳与 python312 依赖，单进程原生直跑（STRATA_BIND=0.0.0.0、STRATA_PORT=8791 不变）；桌面图标改端口直达（不占统一网关前缀）；manifest 加 service_port/checkport（照官方 Cloudrive2 包形态）。v0.2.2.2 包被本构建取代，请直接装 0.2.2.3。
 - **0.2.2.2**：fork 补丁——① installer 打包模式免 GitHub 下载（捆绑 gguf-py + `STRATA_LLAMA_CPP_ZIP` 镜像变量）；② wizard/文档写明模型目录属主要求与 `--gguf-dir` 直读。
 - 0.2.2.1（首个构建，内容=官方 AppImage `Strata-0.2.2-linux-nvidia-cuda12` 解包，SHA256 `7506fd9e…fd539` 校验通过）。

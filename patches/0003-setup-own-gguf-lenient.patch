@@ -1,0 +1,28 @@
+--- setup.py.bak-pre-ownlenient-20261023-150410	2026-10-23 14:46:30.911948945 +0800
++++ setup.py	2026-10-23 15:04:10.889158015 +0800
+@@ -2867,9 +2867,9 @@
+         return
+     have = s.stat().st_size if s.exists() else -1
+     if have != size:
+-        if own:                                        # --gguf-dir: the person's own file is never deleted by setup
+-            fail(f"{s.name} is {have:,} bytes; the published file is {size:,}",
+-                 "it may be cut short or another version; your file was left as it is. Copy the whole published file into the folder")
++        if own:                                        # --gguf-dir: 自带 GGUF（改版/破甲权重尺寸与官方 pinned 不同）按"用你自己的文件"继续，不中止
++            warn(f"{s.name} is {have:,} bytes; the published file is {size:,} — using your own file as it is")
++            return
+         fail(f"{s.name} is {have:,} bytes, not {size:,}", "delete it and run setup again (the download restarts)")
+     say(f"  checking {s.name} (SHA-256, {size / 1e9:.1f} GB) ...")
+     digest = _hash_file(s, size)
+@@ -2882,9 +2882,9 @@
+         else:
+             say("  The damaged parts could not be found this way.")
+     if digest != sha:
+-        if own:
+-            fail(f"{s.name} does not match the published file (SHA-256 {digest}, expected {sha})",
+-                 "it may be damaged or another version; your file was left as it is. Copy the whole published file into the folder")
++        if own:                                        # 同上：自带文件哈希与官方不同只提示，不中止
++            warn(f"{s.name} does not match the published file (SHA-256 {digest}, expected {sha}) — using your own file as it is")
++            return
+         s.unlink(missing_ok=True)
+         m.unlink(missing_ok=True)
+         fail(f"{s.name} has the wrong SHA-256 ({digest}, expected {sha}): deleted",
