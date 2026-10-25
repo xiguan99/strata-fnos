@@ -1,5 +1,7 @@
 #!/bin/bash
-# strata-fnos 发布脚本（GitHub API 版，照 freellmapi-fnos）
+# strata-fnos 发布脚本（GitHub API 版）
+# 出处：最初从 qwenpaw-fnos 版改来。此前注释误写成“照 freellmapi-fnos”，而实际抄的是
+# qwenpaw 版，导致照注释去改的人会改错方向；2026-10-25 已按事实更正。
 # 创建 Release 并上传本次版本对应的 dist fpk。依赖：GITHUB_TOKEN 环境变量
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,6 +11,13 @@ GITHUB_TOKEN="${GITHUB_TOKEN:?需要设置 GITHUB_TOKEN 环境变量}"
 CUR_VERSION="$(cat VERSION | tr -d '[:space:]')"
 TAG="v$CUR_VERSION"
 DIST="${DIST_DIR:-$ROOT/dist}"
+# ── 同步提醒 ────────────────────────────────────────────────
+# 下面这段“从 manifest 派生应用名/标题”的逻辑，另外两个仓库里也有同一份：
+#   xiguan99/freellmapi-fnos/scripts/publish.sh
+#   xiguan99/qwenpaw-fnos/scripts/publish.sh
+# 三处内容必须一致，改就三处一起改（不抽公共脚本/submodule：8 行 sed 不值得多一层维护，
+# 同步靠这条注释 + 台账 checklist）。
+# ───────────────────────────────────────────────────────────
 # 应用名/显示名一律从 manifest 读，不在这里硬编码。
 # 2026-10-25 教训：本脚本照 qwenpaw-fnos 改来时把 Release 标题硬编码成 "QwenPaw …" 没改，
 # 结果 external 看到的第一行字是别家产品名。改成从 manifest 派生后，这种复制残留不可能再发生。
