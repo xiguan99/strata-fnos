@@ -1,5 +1,5 @@
 appname               = strata
-version               = 0.2.2.5
+version               = 0.2.4.1
 display_name          = Strata
 desc                  = Strata 官方桌面应用的 fnOS 原生打包版（MIT 上游 Niko1221/Strata）：自带 node/host/control/harness/引擎全量运行时，本地大模型对话工作台。<br/>桌面图标/浏览器端口直达 http://<NAS>:8791/（原生绑定，无壳无网关反代）；可自动发现本机已有推理后端
 platform              = x86

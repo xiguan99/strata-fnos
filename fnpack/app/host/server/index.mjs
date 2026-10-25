@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { engineProgressMark } from './agent/engine-progress.mjs';
+import './system-ca.mjs';        // #3722: the operating system's certificates, before any HTTPS request
 import { createCloudflare } from './cloudflare.mjs';
 import { createConnectorInstaller } from './cloudflared-install.mjs';
 import { findRunningConnector } from './cloudflared-find.mjs';
@@ -15,6 +17,7 @@ import { materializeSkills, parseSkillFile, skillSlug, writeCreatedSkill } from 
 import { systemFonts } from './fonts.mjs';
 import { tuningDir } from './platform-paths.mjs';
 import { createAgentBridge, plainTurnFailure } from './agent/agent-bridge.mjs';
+import { mcpSkippedNotices } from './agent/profile.mjs';
 import { createAgentTools } from './agent/tools-settings.mjs';
 import { withPlainStatus } from './agent/status.mjs';
 import { findBrowser, findPlaywrightMcp } from './agent/browser-probe.mjs';
@@ -28,7 +31,7 @@ import { findBrowser, findPlaywrightMcp } from './agent/browser-probe.mjs';
  * live metrics and the local inference API. No runtime dependencies.
  */
 import http from 'node:http';
-import { homedir, hostname as osHostname, networkInterfaces } from 'node:os';
+import { homedir } from 'node:os';
 import { cpSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
@@ -55,6 +58,7 @@ import { RequestQueue } from './request-queue.mjs';
 import { selectSkills, skillInstructions } from './skill-selection.mjs';
 import { createModelProviders } from './model-providers.mjs';
 import { createForkTimeskip } from './timeskip-fork.mjs';
+import { prepareOversized } from './oversize.mjs';
 import { createChatFolders, chatRootOf, openFile, resolveChatFile, previewFile, rawFile, createAttachments, withAttachments } from './chat-files.mjs';
 import { createLlmProxy, samplingFromExpert } from './agent/llm-shape.mjs';
 import { checkUpdates, checkComponentUpdates } from './updates.mjs';
@@ -138,7 +142,7 @@ if (control) {
     return answer && !answer.usable && bundledWrongMake ? { ...answer, notice: bundledWrongMake, wrongMake: true } : answer;
   };
 }
-const native=createNativeControl({control,ready:bundledEngine,appUpdater,defaultRepo:process.env.STRATA_NATIVE_REPO??resolve(ROOT,'..'),hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
+const native=createNativeControl({control,ready:bundledEngine,appUpdater,hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
 /* The agent: chats become DeepSeek Harness sessions when that component is installed. It is a separate
    pinned component (STRATA_HARNESS_DIR), not part of this host, so its absence is a visible capability
    state and the chat falls back to the direct path with a notice, never silently to another model. */
@@ -174,12 +178,15 @@ const agent = createAgentBridge({
   // The person's Response settings (thinking budget, Expert sampling) reach the agent's model through this host's own forwarding endpoint.
   proxyBase: `http://127.0.0.1:${PORT}/api/internal/agent-llm`,
   expertSampling: () => samplingFromExpert(store.get().expert),
+  // How far a local engine has got (the 2 s /metrics poll), for the agent's stall watchdog: it moves while a long prompt is read.
+  engineProgress: instanceId => engineProgressMark(native.readyInstances().find(i => i.id === instanceId)),
   onPlan: (chatId, event, plan) => hub.send('plan', { chatId, event, plan }),
   onQueue: (chatId, queue) => hub.send('queue', { chatId, queue }),
   dataDir: store.DATA_DIR,
   componentsDir: componentsDirectory(),
   // The installer ships the Harness next to the host (<install>/host/server -> <install>/harness).
   bundledDir: resolve(HERE, '..', '..', 'harness'),
+  defaultLocalId: () => native.defaultInstanceId(),
   localInstances: () => native.readyInstances().map(i => ({
     id: i.id, label: i.label, baseUrl: `http://127.0.0.1:${i.port}/v1`, modelId: i.apiModelId,
     context: i.metrics?.engine?.max_context ?? i.context ?? undefined, key: i.key, vision: i.vision,
@@ -601,8 +608,11 @@ async function runAgentTurn({ res, controller, chatId, body, message, workspaceI
     const goalLine = /^\/goal(?:\s+([\s\S]*))?$/i.exec(message.trim());
     const planLine = /^\/plan(?:\s+([\s\S]*))?$/i.exec(message.trim());
     const researchLine = /^\/research(?:\s+([\s\S]*))?$/i.exec(message.trim());
+    // "/compact" summarises the older messages of this chat now (it used to go to the model as text, which answered it as a question).
+    const compactLine = /^\/compact\s*$/i.test(message.trim());
     const turnOptions = { chatId, message, workspacePath: cwd, choice, images, mode: typeof body.mode === 'string' ? body.mode : null, thinking: typeof body.thinking === 'string' ? body.thinking : null, thinkingBudget: Number.isFinite(body.thinkingBudget) ? body.thinkingBudget : 0, history: Array.isArray(body.history) ? body.history : [], onFrame: write, signal: controller.signal };
     const result = typeof body.planId === 'string' && body.message === '/plan start' ? await agent.planGoal({ ...turnOptions, planId: body.planId })
+      : compactLine ? await agent.compactCommand(turnOptions)
       : researchLine ? await agent.researchCommand({ ...turnOptions, line: researchLine[1] ?? '' })
       : planLine ? await agent.planCommand({ ...turnOptions, line: planLine[1] ?? '' })
       : goalLine ? await agent.goalCommand({ ...turnOptions, line: goalLine[1] ?? '' }) : await agent.runTurn(turnOptions);
@@ -921,29 +931,6 @@ await cloudflare.inspect();
 
 /* --------------------------------------------------------------- routing --- */
 
-/* host controls 的来源判定：官方只放行 localhost / 127.0.0.1 / [::1]。fnOS 装机版没有桌面宿主外壳，
-   用户是浏览器直接开 http://<NAS 局域网 IP>:8791 —— 那种 Origin 会被判成"不是本机"，所有 /api 一律 403，
-   界面就冒出「打开本地 Strata 应用以使用主机控件」。这里把本机所有网卡地址与主机名也认作本机（局域网访问正常），
-   外网域名仍然拦在外面。 */
-const localHostNames = (() => {
-  const names = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
-  const add = (v) => { if (typeof v === 'string' && v) names.add(v.toLowerCase()); };
-  add(osHostname());
-  add(`${osHostname()}.local`);
-  try {
-    for (const list of Object.values(networkInterfaces())) {
-      for (const item of list ?? []) add(item?.address);
-    }
-  } catch { /* 拿不到网卡表就只放行回环地址 */ }
-  return names;
-})();
-function isLocalOrigin(hostname) {
-  const name = String(hostname ?? '').toLowerCase().replace(/\.$/, '');
-  if (!name) return true;
-  if (localHostNames.has(name)) return true;
-  return /^127\./.test(name) || name === '::1';
-}
-
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const path = url.pathname;
@@ -961,7 +948,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (path.startsWith('/api/') && req.headers.origin) {
       const origin = new URL(req.headers.origin);
-      if (!isLocalOrigin(origin.hostname)) return error(res, 403, 'Open the local Strata app to use host controls.');
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) return error(res, 403, 'Open the local Strata app to use host controls.');
     }
     if (path.startsWith('/api/')) {
       const modelOperation = !['GET', 'OPTIONS'].includes(method) && /^\/api\/(models|local-models|runtime|image-models|engine|native)(\/|$)/.test(path) && !['/api/runtime/plan', '/api/engine/validate', '/api/local-models/inspect'].includes(path);
@@ -1740,6 +1727,16 @@ async function api(req, res, path, method, url) {
     try { const f = rawFile(chatRoot(url.searchParams.get('sessionId') ?? ''), url.searchParams.get('path')); res.writeHead(200, { 'content-type': f.mime, 'content-length': f.bytes.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(f.bytes); return undefined; }
     catch (e) { return error(res, e.code === 'outside' ? 403 : 400, e.message); }
   }
+  /* A message too large for the model's window, made small enough to send: its text as a file in the chat's folder, or a shortened preview (oversize.mjs). */
+  if (path === '/api/chat/oversize' && method === 'POST') {
+    const body = await readBody(req, 12 * 1024 * 1024);
+    const text = String(body.text ?? '');
+    if (!text.trim()) return error(res, 400, 'text is required');
+    let instance = null;
+    try { instance = native.resolveInstance(body.nativeModelId ?? native.state().defaultId); } catch { /* no local model: the length alone decides */ }
+    try { return json(res, 200, await prepareOversized({ mode: body.mode === 'file' ? 'file' : 'preview', text, root: chatRoot(String(body.sessionId ?? '')), instance })); }
+    catch (e) { return error(res, 400, 'The message could not be prepared. Try a shorter message.'); }
+  }
   /* "Attach as context": the file is named in the next message of the chat, so the assistant reads it again. */
   if (path === '/api/chat/attachments' && method === 'GET') return json(res, 200, { files: chatAttachments.list(url.searchParams.get('sessionId') ?? '') });
   if (path === '/api/chat/attachments' && method === 'POST') {
@@ -1957,6 +1954,8 @@ async function api(req, res, path, method, url) {
     if (chatId && !agentSkip) {
       const capability = agent.status();
       if (capability.state !== 'unavailable') {
+        const skipped = mcpSkippedNotices(capability.skippedServers);
+        for (const notice of skipped) res.write(`${JSON.stringify({ type: 'notice', ...notice })}\n`);
         await runAgentTurn({ res, controller, chatId, body, message, workspaceId, images });
         res.end();
         return undefined;

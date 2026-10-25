@@ -35,6 +35,9 @@ if grep -rn -e 'sk-[A-Za-z0-9]\{20,\}' -e 'token=[A-Za-z0-9]' "$ROOT/fnpack/cmd"
   echo "✗ 自产文件疑似泄漏密钥，中止（自行 grep 处理）"; exit 1
 fi
 
+# 图标权限：fnOS 应用中心以组身份读取 ICON.PNG，组无读权限会静默退回默认占位图
+chmod 644 "$ROOT/fnpack/ICON.PNG" "$ROOT/fnpack/ICON_256.PNG" 2>/dev/null || true
+
 # ── 3) fnpack ──
 echo "[3/3] fnpack 打包 ..."
 sed -i "s/^version .*=.*/version               = $VERSION/" "$ROOT/fnpack/manifest"
@@ -42,4 +45,13 @@ cd "$ROOT/fnpack"
 "$FP_BIN" build
 mv -f strata.fpk "$ROOT/dist/strata_v${VERSION}_x86.fpk"
 ls -la "$ROOT/dist/"
+# ── 出包后硬断言：图标必须 644（否则应用中心显示占位图）──
+CHK="$(mktemp -d)"
+tar -xzf "$ROOT/dist/strata_v${VERSION}_x86.fpk" -C "$CHK" ICON.PNG ICON_256.PNG || true
+for ic in ICON.PNG ICON_256.PNG; do
+  m=$(stat -c%a "$CHK/$ic" 2>/dev/null || echo missing)
+  [ "$m" = "644" ] || { echo "✗ $ic 权限=$m（必须 644）"; rm -rf "$CHK"; exit 1; }
+done
+rm -rf "$CHK"
+echo "  ✓ 图标权限 644 断言通过"
 echo "═══ 完成 ═══"
