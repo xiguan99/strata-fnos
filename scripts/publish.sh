@@ -25,6 +25,7 @@ RELEASE_JSON="$(curl -sS -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Acc
 RELEASE_ID="$(echo "$RELEASE_JSON" | grep -m1 '"id"' | grep -oE '[0-9]+')"
 [ -n "$RELEASE_ID" ] || { echo "✗ 创建 Release 失败: $RELEASE_JSON"; exit 1; }
 echo "上传 $(basename "$FPK") ..."
-UP="$(curl -sS -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/octet-stream" "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$(basename "$FPK")" --data-binary @"$FPK")"
+# 用 -T 流式上传：--data-binary 会把整包读进内存，1.1GB 直接 curl: out of memory
+UP="$(curl -sS -X POST -T "$FPK" -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/octet-stream" --max-time 3600 "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$(basename "$FPK")")"
 echo "$UP" | grep -q '"id"' && echo "  ✓ $(echo "$UP" | grep -m1 '"browser_download_url"' || true)" || { echo "  ✗ $UP"; exit 1; }
 echo "═══ 发布完成: https://github.com/$REPO/releases/tag/$TAG ═══"
