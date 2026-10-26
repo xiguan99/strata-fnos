@@ -27,3 +27,15 @@ python3 -m py_compile setup.py
 `/vol1/1000/work/deepseek/fnos-apps/strata/fnpack/app/control/COMMIT` 记录决定这三份补丁上游 commit（当前 `76f90e58…`，
 control 版本 0.1.47、engine 0.1.47）。换 bundle 后先跑一次「自带 GGUF 安装」回归：装完 `GET /api/native` 的
 `installed.models[].ownGgufDir` 必须指向你选的那个目录。
+
+## 0.2.6.1 重放结论（2026-10-26）
+
+换 control 0.1.48 → **0.1.51** 后的实际处理：
+
+| # | 结论 | 理由 |
+|---|------|------|
+| 0001 MTP 本地复用 | **已重放** | 上游仍无此逻辑；`reuse_local_mtp()` 函数体原样搬入，并在 MTP 下载前插入 3 行复用调用。`grep -c reuse_local_mtp setup.py` = 2，`py_compile` 通过 |
+| 0002 GGUF 命名提示 | **不再重放** | 上游 0.1.51 把该分支改成直接 `return None`（不再给出提示），函数签名与失败路径已变；强插会盖住上游新的判定顺序。仅影响提示文字，不影响能否使用自带权重 |
+| 0003 自带权重宽容校验 | **上游已吸收** | 0.1.51 的 `verify_sha256` 新增 `own_gguf_is_whole()`：自带文件是完整 GGUF 时一律 `warn` 后继续使用，官方原补丁的两处 `fail` 分支已被取代。再打会造成重复逻辑 |
+
+换 bundle 的完整步骤：`rsync -a --delete` 覆盖 `host/ harness/ node/ control/` → 重放 0001 → `py_compile setup.py` → 换 `engine-bundle/<版本目录>` → 改 `VERSION` → `bash scripts/build.sh`。
