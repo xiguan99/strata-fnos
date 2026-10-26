@@ -1,0 +1,39 @@
+def reuse_local_mtp(mtp: Path, data: Path, elsewhere) -> str:
+    """装机环境常常连不上 Hugging Face，而本机可能已经有一份成品 MTP 层（<data>/models/mtp，或以前安装目录的
+    mtp/、models/mtp/）。先把那份整棵树复用过来（tensors/、rt/、manifest 一起；同一文件系统用硬链接，零拷贝），
+    只有本机确实没有时才去下载。复用完 gguf 与 rt 都在本地生成，不再联网。"""
+    candidates = [data / "models" / "mtp"] + [Path(e) / "models" / "mtp" for e in elsewhere] + \
+                 [Path(e) / "mtp" for e in elsewhere]
+    for src in candidates:
+        ready = src / "mtp-q2_0.gguf"
+        try:
+            if not ready.is_file() or ready.stat().st_size < 1_000_000:
+                continue
+            if src.resolve() == mtp.resolve():
+                continue
+        except OSError:
+            continue
+        try:
+            mtp.mkdir(parents=True, exist_ok=True)
+            for root, _dirs, files in os.walk(src):
+                rel = os.path.relpath(root, src)
+                here = mtp if rel == "." else mtp / rel
+                here.mkdir(parents=True, exist_ok=True)
+                for name in files:
+                    if name.endswith(".lock"):
+                        continue
+                    item, dest = Path(root) / name, here / name
+                    if dest.exists():
+                        continue
+                    try:
+                        os.link(item, dest)                 # same filesystem: no copy
+                    except OSError:
+                        try:
+                            shutil.copy2(item, dest)        # another drive: copy it once
+                        except OSError as e:
+                            warn(f"could not copy {item} ({e})")
+            if (mtp / "mtp-q2_0.gguf").is_file():
+                return str(src)
+        except OSError as e:
+            warn(f"could not reuse the draft layer at {src} ({e})")
+    return ""
