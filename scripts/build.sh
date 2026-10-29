@@ -38,6 +38,20 @@ fi
 # 图标权限：fnOS 应用中心以组身份读取 ICON.PNG，组无读权限会静默退回默认占位图
 chmod 644 "$ROOT/fnpack/ICON.PNG" "$ROOT/fnpack/ICON_256.PNG" 2>/dev/null || true
 
+# ── 2.5) 补丁守卫：局域网 Origin（2026-10-29 回归事故，同步上游时被丢掉过一次）──
+echo "[2.5/3] 补丁守卫：局域网 Origin ..."
+HOST_JS="$APP/host/server/index.mjs"
+if ! grep -q 'isLocalOrigin' "$HOST_JS"; then
+  echo "✗ $HOST_JS 缺局域网 Origin 补丁（isLocalOrigin 0 命中）——上游同步把它丢了"; \
+  echo "  按 patches/README.md 的 0004 重放后再构建"; exit 1
+fi
+grep -q 'if (!isLocalOrigin(origin.hostname))' "$HOST_JS" || {
+  echo "✗ isLocalOrigin 存在但白名单判断没接上（仍是官方硬编码 localhost/127.0.0.1）"; exit 1; }
+if command -v node >/dev/null 2>&1; then
+  node --check "$HOST_JS" || { echo "✗ $HOST_JS 语法检查失败"; exit 1; }
+fi
+echo "  ✓ 局域网 Origin 补丁在位"
+
 # ── 3) fnpack ──
 echo "[3/3] fnpack 打包 ..."
 sed -i "s/^version .*=.*/version               = $VERSION/" "$ROOT/fnpack/manifest"
