@@ -121,3 +121,34 @@ strata-swift-iq3_s.log:568  [strata] roles GPU 0=off, GPU 1=main; running on GPU
 **tune 文件缺 `gpu_roles` 的根因**：`writeTuneConfig()` 写的正是 `buildConfig()` 出来的 cfg，而旧 `buildConfig()` 只在屏幕传了 `gpuRoles` 时才产出
 `gpu_roles`；setup 生成的设置文件只有 `gpu`，于是 tune 文件也跟着没有角色 —— 属**上游设计缺口**（不是我们改坏的回归），已由本补丁一并覆盖：
 现在任何一次 load/tune 出去都带 `gpu_roles`。
+
+## 0006 角色为空不许兜底到 0 号卡 + 启动前显存预检（2026-10-29 第二次回归后固化）
+
+0005 上线后 Rain 用**真实入口**（页面「加载模型」）验收，日志仍是 `roles: {} | physical: [0]`，引擎落到 40HX 上退出 1。
+根因不是角色解析写错，而是**「这是不是人选的」判错了**：
+
+1. `args.gpus` 被前端当成「推荐卡」一起发过来（`gpusFromRecommendation: true`），而设置文件里已有 `"gpu": 0`（`namedInFile`）
+   → 落进 `buildConfig` 的 `else` 兜底分支，那里原来的判据是 `args.gpuRoles!==undefined||args.gpus!==undefined`，
+   于是**只要前端带了推荐卡就被当作「人选的」**，角色表一个都没应用，`cfg.gpu` 保持设置文件里的裸 `0`。
+2. 即便走到 `else if(cfg.gpu_roles && write(cfg.gpu_roles))`，`gpu_roles: {}`（空表）也满足 `&&` 真值 → 同样跳过兜底。
+
+修法（`host/server/native-control.mjs`，构建脚本 2.6 段守卫）：
+
+- 判据改成 `choseRoles = roleList(args.gpuRoles).length>0`（**空表不算选择**）与
+  `choseCards = args.gpus!==undefined && !(args.gpusFromRecommendation && namedInFile)`（**推荐不等于选择**）。
+- `cfg.gpu_roles` 分支同样要求 `roleList(cfg.gpu_roles).length>0`。
+- 都没有时按顺序兜底：`lastRoles(model)`（上次运行记录的角色）→ `lastTuneRoles(model)`（上次 tune 写下的角色，
+  `${DATA}/native-tune/<model>.json`，只取主卡、其余 Off）→ 单卡机器直接用那张卡 → 多卡机器**拒绝启动**并说明去角色界面选主卡。
+- 日志三样统一由 `say()` 输出：`roles: {...} | physical: [...] | CUDA_VISIBLE_DEVICES=...`。
+
+同时新增 0006 的启动前显存预检（`vramRefusal` / `recordVramNeed` / `gpuMemory`）：
+
+- 每次成功 ready 后，按「加载前该卡空闲 − 就绪后该卡空闲」把**这个模型在这张卡上实际吃了多少 MiB**记进
+  `${DATA}/native-vram.json`（0600）。
+- 下次加载前，对每张将要暴露给引擎的卡比对：空闲 < 上次所需 +512 MiB（或首次加载的保守下限 2.5 GiB）就
+  **在启动引擎前拦下**，报「GPU N（共 X MiB，空闲 Y MiB）装不下这个模型：上次它需要 Z MiB。请在设置 → 卡槽角色里换主卡，
+  或调小上下文 / KV 常驻格数」。对应实测事故：40HX 空闲 3.6 GiB、该配置需 3.02 GiB 的 KV 常驻 + 权重余量，
+  引擎起、报 `slot 0's session does not fit on CUDA0 (needs 0.95 GiB, 0.88 GiB free)`、退出 1。
+
+`cmd/main` 的模型根可写性检查增加 `setfacl -m u:<运行用户>:rwx` 兜底（应用沙箱里 `chown` 可能被拒），
+但正确做法仍是在「应用设置 → 访问权限 → 允许访问以下文件夹」把模型根授权为**读写**。

@@ -58,12 +58,16 @@ NC_JS="$APP/host/server/native-control.mjs"
 grep -q 'function rolesToDevices' "$NC_JS" || {
   echo "✗ $NC_JS 缺角色→设备解析补丁（rolesToDevices 0 命中）——上游同步把它丢了"; \
   echo "  按 patches/README.md 的 0005 重放后再构建"; exit 1; }
-grep -q 'mainCardNote=`roles' "$NC_JS" || {
-  echo "✗ 角色补丁不完整（mainCardNote 没写出角色/物理卡/CUDA_VISIBLE_DEVICES 三样）"; exit 1; }
+grep -q 'CUDA_VISIBLE_DEVICES=${shown.join' "$NC_JS" || {
+  echo "✗ 角色补丁不完整（日志那一行没写出角色/物理卡/CUDA_VISIBLE_DEVICES 三样）"; exit 1; }
 grep -q 'CUDA0. Choose the Main card' "$NC_JS" || {
   echo "✗ 角色补丁缺「解析不出就拒绝启动」的拦截"; exit 1; }
 grep -q 'function lastRoles' "$NC_JS" || {
   echo "✗ 角色补丁缺 lastRoles 兜底（上次运行的主卡）"; exit 1; }
+grep -q 'function lastTuneRoles' "$NC_JS" || {
+  echo "✗ 角色补丁缺 lastTuneRoles（设置文件丢了角色时读上次 tune 的主卡）"; exit 1; }
+grep -q 'function vramRefusal' "$NC_JS" || {
+  echo "✗ 缺显存预检补丁（0006：卡装不下就在启动前拦住并说清数字）"; exit 1; }
 SRV_PY="$APP/control/serve/server.py"
 grep -q 'def gpu_names_by_index' "$SRV_PY" || {
   echo "✗ $SRV_PY 缺卡名日志补丁（gpu_names_by_index 0 命中）"; \

@@ -76,7 +76,7 @@ prepare_data_dirs() {
             else
                 [ -w "${target}" ] || writable=0
             fi
-            [ "${writable}" = "1" ] || log_err "数据目录 ${target} 对应用用户 ${RUN_USER} 不可写：安装/加载会失败，请在 Strata 设置里换一个模型文件夹"
+            [ "${writable}" = "1" ] || log_err "数据目录 ${target} 对应用用户 ${RUN_USER} 不可写：飞牛只允许应用写「应用设置 → 访问权限 → 允许访问以下文件夹」里授权的目录，请把该目录加进去并选「读写」（或在这儿换一个模型文件夹）"
         done
     done
 }
