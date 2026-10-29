@@ -109,6 +109,8 @@ scripts/build.sh
 
 `control/` 目录不纳入版本管理（体积大且来自上游），从官方 AppImage 解包后按 `patches/` 下的记录重放少量兼容性补丁，再执行构建。
 
+**引擎二进制永久不入 git**：`fnpack/app/engine-bundle/` 下单个 `libcublasLt.so.12` 就有 749MB、`strata` 本体 479MB，一次 `git add -A` 会把 684MB 暂存进去，push 必然 408 失败、仓库也被撑成 GB 级。这些文件随 fpk 与 GitHub Release 资产发布，仓库里只保留 `BUILD.json` 等元数据与忽略规则（`.gitignore` 覆盖 `engine-bundle/` 与 `*.fpk`）。
+
 ## 版本
 
 - **0.2.6.1**：对齐上游 v0.2.6（host 0.2.6、control 0.1.51、CUDA 引擎沿用 0.1.50）。上游说明 Qwen 引擎在 0.2.5→0.2.6 之间未变，故引擎不重下；三份 control 补丁中「自带权重宽容校验」已被上游 0.1.51 吸收（现在完整 GGUF 一律按原样使用只告警），「GGUF 命名提示」上游改回静默、本包不再重放，仅重放「MTP 本地复用」。

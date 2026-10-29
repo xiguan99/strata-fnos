@@ -97,7 +97,27 @@ const DIST = process.env.STRATA_DIST
   : distFlag >= 0
     ? resolve(argv[distFlag + 1] ?? join(ROOT, 'dist'))
     : join(ROOT, 'dist');
-const PORT = Number(process.env.STRATA_PORT ?? 8791);
+/* The listening port, in order of authority: the carrier's environment (the fnOS package exports
+   STRATA_PORT from the manifest's service_port), then the manifest itself (`service_port`), then the
+   upstream default. Reading the manifest here keeps a packager from having to hardcode the port in
+   two places: change `service_port` and both sides follow. On fnOS the manifest lives beside the
+   payload (/var/apps/<app>/manifest, next to the `target` symlink) rather than inside it, so both
+   layouts are tried. */
+function manifestPort() {
+  const candidates = [
+    join(ROOT, '..', 'manifest'),                                  // upstream layout: manifest beside host/
+    join('/var/apps', process.env.TRIM_APPNAME ?? 'strata', 'manifest'), // fnOS layout
+  ];
+  for (const file of candidates) {
+    try {
+      const m = readFileSync(file, 'utf8').match(/^\s*service_port\s*=\s*(\d+)\s*$/m);
+      const n = m ? Number(m[1]) : NaN;
+      if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
+    } catch { /* try the next place */ }
+  }
+  return null;
+}
+const PORT = Number(process.env.STRATA_PORT ?? manifestPort() ?? 8791);
 const HOST = process.env.STRATA_BIND ?? '127.0.0.1';
 /* The folder chats work in when nothing else is chosen. It is never the app's own folder (the host is started inside its install
    directory, so `process.cwd()` was "host" in the sidebar and the agent could read and write the app): the person's own

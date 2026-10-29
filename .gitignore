@@ -1,7 +1,17 @@
 .secrets.env
 stage/
 
-dist/*.fpk
+# 构建产物永不入库：fpk 都在 1.1GB 级别，随 Release 资产发布
+*.fpk
+# 引擎二进制（单个 libcublasLt.so.12 就有 749MB）永不入库：
+# 一旦 git add -A 暂存进去，push 必然 408，仓库也会被撑到 GB 级。随 fpk 与 Release 发布。
+# 写法要点：忽略的是目录内容而不是目录本身，否则下面的 ! 反选对子目录无效。
+fnpack/app/engine-bundle/*
+!fnpack/app/engine-bundle/*/
+fnpack/app/engine-bundle/*/*
+!fnpack/app/engine-bundle/.gitignore
+!fnpack/app/engine-bundle/*/*.json
+!fnpack/app/engine-bundle/*/*.txt
 fnpack/app/run-swift-*
 fnpack/app/strata-*.json
 fnpack/app/*.log

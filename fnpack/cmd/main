@@ -1,6 +1,6 @@
 #!/bin/bash
 # strata-fnos 生命周期入口（单进程原生直跑，无壳）
-# 自带 node runtime 直接跑官方 server，原生绑 0.0.0.0:8791（对外端口不变）；桌面图标端口直达，不走统一网关
+# 自带 node runtime 直接跑官方 server，原生绑 0.0.0.0:<manifest.service_port>（本包默认 8791，不写死）；桌面图标端口直达，不走统一网关
 # 零宿主机依赖：node/engine 均为官方 AppImage 解包自带
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
@@ -23,7 +23,25 @@ export HOME="${DATA_DIR}"
 # 也可临时改 STRATA_SOURCE=modelscope 走 ModelScope，但那边是仓库当前文件、丢了 pinned 版本校验）
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
-export STRATA_PORT="8791"           # 对外端口（原生绑定，桌面图标端口直达）
+# 对外端口不写死：以 manifest 的 service_port 为准，拿不到合法值才退回 8791。
+# 别人要换端口只改 manifest 一处，桌面图标与后端监听同时跟着走，不用改代码。
+# 取值顺序：TRIM_SERVICE_PORT（fnOS 自己从 manifest 读好注入，最权威）
+#          → manifest 文件（兼容非 fnOS 载体；fnOS 的 manifest 在 /var/apps/<app>/，不在 payload 目录）
+#          → 8791
+manifest_port() {
+    p="${TRIM_SERVICE_PORT:-}"
+    if [ -z "${p}" ]; then
+        for m in "${APP_DIR}/manifest" "/var/apps/${TRIM_APPNAME}/manifest"; do
+            [ -f "${m}" ] || continue
+            p=$(sed -n 's/^[[:space:]]*service_port[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${m}" 2>/dev/null | head -n 1)
+            [ -n "${p}" ] && break
+        done
+    fi
+    case "${p}" in ''|*[!0-9]*) p=8791 ;; esac
+    if [ "${p}" -lt 1 ] || [ "${p}" -gt 65535 ]; then p=8791; fi
+    printf '%s' "${p}"
+}
+export STRATA_PORT="${STRATA_PORT:-$(manifest_port)}"   # 对外端口（原生绑定，桌面图标端口直达）
 export STRATA_BIND="0.0.0.0"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "${LOG_FILE}"; }
