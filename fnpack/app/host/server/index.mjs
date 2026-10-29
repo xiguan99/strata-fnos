@@ -279,7 +279,8 @@ const backend = await detectBackend({ force: true });
 
 console.log(`strata host  ·  http://${HOST}:${PORT}`);
 console.log(`hardware     ·  ${boot.accelerator.label} / ${boot.accelerator.backend} / ${boot.cpu.cores} cores / ${Math.round(boot.memory.totalGb)} GB`);
-const printInference = engine => console.log(`inference    ·  ${models.REAL ? inferenceLine({ backend, engine, settled: bundledEngineSettled }) : 'simulated (design iteration) — set STRATA_REAL_ENGINE=1 for a real engine'}`);
+/* fnOS patch 0007: this banner names the *supervisor* engine. The packaged build loads through Strata Control, so the demo wording was a lie about a real engine (2026-10-29). */
+const printInference = engine => console.log(`inference    ·  ${models.REAL ? inferenceLine({ backend, engine, settled: bundledEngineSettled }) : (control ? 'native engine — models load through Strata Control (no demo backend in this build)' : 'simulated (design iteration) — set STRATA_REAL_ENGINE=1 for a real engine')}`);
 if (models.REAL && control && backend.kind === 'unavailable' && bundledEngineSettled) void control.engine().catch(() => null).then(printInference);
 else printInference(null);
 console.log(`models dir   ·  ${store.MODELS_DIR}`);

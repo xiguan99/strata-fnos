@@ -254,10 +254,23 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
    catch{return null;}
  }
  function vramLedger(){return readJson(join(directory,'native-vram.json'),{});}
- function vramNeedMib(model,cards){const ledger=(vramLedger()[model]??{});return Math.max(0,...cards.map(index=>Number(ledger[String(index)]?.mib??0)));}
- function recordVramNeed(model,cards,usedMib){if(!cards.length||!(usedMib>0))return;
+ /* The figure a load left behind only describes the arguments it ran with: change --kv-resident or --max-context and the old figure is history, so the
+    record is stamped with a signature of the memory-relevant arguments and ignored once they differ (0006). */
+ function vramSignature(cfg){
+   const args=Array.isArray(cfg?.args)?cfg.args:[];
+   const watched=new Set(['--max-context','--kv-resident','--batch','--parallel','--mtp','--vram-reserve-mib','--resident-experts','--mmap-experts','--expert-cache','--pool-workers']);
+   const kept=[];
+   for(let i=0;i<args.length;i++){const flag=String(args[i]);if(!watched.has(flag))continue;kept.push(flag+'='+String(args[i+1]??''));i+=1;}
+   return kept.join(' ');
+ }
+ function vramNeedMib(model,cards,cfg){
+   const ledger=(vramLedger()[model]??{});const mine=vramSignature(cfg);
+   return Math.max(0,...cards.map(index=>{const row=ledger[String(index)];if(!row)return 0;return String(row.sig??'')===mine?Number(row.mib??0):0;}));
+ }
+ function recordVramNeed(model,cards,usedMib,cfg){if(!cards.length||!(usedMib>0))return;
    try{const ledger=vramLedger();ledger[model]??={};let changed=false;
-     for(const index of cards){const was=Number(ledger[model][String(index)]?.mib??0);if(usedMib>was){ledger[model][String(index)]={mib:Math.round(usedMib),at:new Date().toISOString()};changed=true;}}
+     const sig=vramSignature(cfg);
+     for(const index of cards){ledger[model][String(index)]={mib:Math.round(usedMib),at:new Date().toISOString(),sig};changed=true;}
      if(changed)writeFileSync(join(directory,'native-vram.json'),JSON.stringify(ledger,null,2)+'\n',{mode:0o600});
    }catch{/* only the next load's advice depends on it */}}
  /* The cards a start would get, and whether they can take it: null means "go ahead". */
@@ -266,7 +279,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
    const memory=gpuMemory();if(!memory)return null;                       /* no nvidia-smi: say nothing, do not block a start */
    const needed=vramNeedMib(model,cards),reserve=Number(cfg?.vram_reserve_mib??1024);
    const floor=Math.max(2560,reserve+1536);                               /* first load of a model here: a conservative floor */
-   const limit=needed?needed+512:floor;
+   const limit=needed?needed+512:floor;   /* a measured need plus the same 512 MiB the engine wants as headroom */
    for(const index of cards){const card=memory.get(index);if(!card)continue;
      if(card.free<limit)return `GPU ${index} (${card.total} MiB in all, ${card.free} MiB free) cannot take this model: `
        +(needed?`it needed ${needed} MiB there when it last loaded. `:`a load needs at least ${floor} MiB free. `)
@@ -296,7 +309,8 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   else   if(args.gpus!==undefined&&!(args.gpusFromRecommendation&&namedInFile)){const detected=new Set((snapshot.hardware?.gpus??[]).map(g=>g.index));if(!Array.isArray(args.gpus)||!args.gpus.length||new Set(args.gpus).size!==args.gpus.length||args.gpus.some(g=>!Number.isInteger(g)||!detected.has(g)))throw new Error('Choose distinct detected GPUs. CPU-only text inference is not supported by this native adapter.');cfg.gpu=args.gpus.length===1?args.gpus[0]:args.gpus;for(const k of ['gpu_roles','gpu_cards','gpu_none'])delete cfg[k];delete cfg.hip_ordinal;cfg.layer_split=args.gpus.length>1?validateNativeSettings({layer_split:args.layerSplit??'auto'}).layer_split:'auto';if(cfg.layer_split!=='auto'&&cfg.layer_split.split(',').length!==args.gpus.length-1)throw new Error('Choose one layer split point between each pair of GPUs.');}
   /* fnOS patch 0005: roles -> physical devices -> the engine's CUDA_VISIBLE_DEVICES, whatever the card numbers are on this machine. */
   else   {
-    const cards=(snapshot.hardware?.gpus??[]).filter(g=>g.backend!=='cpu');
+    /* fnOS patch 0006c: a refresh can land before the hardware probe does; ask the probe directly rather than see no cards (an empty list cannot refuse a start either). */
+    const cards=((snapshot.hardware?.gpus?.length?snapshot.hardware:{gpus:hardwareProbe()??[]}).gpus??[]).filter(g=>g.backend!=='cpu');
     const known=new Set(cards.map(g=>g.index));
     const nameOf=i=>String(cards.find(g=>g.index===i)?.name??`GPU ${i}`);
     const write=roles=>{const usable=Object.fromEntries(roleList(roles).filter(([i])=>known.has(i)));const u=rolesToDevices(usable);if(!u)return false;for(const k of ['gpu','gpu_order','gpu_none','gpu_roles','gpu_cards','hip_ordinal'])delete cfg[k];cfg.gpu=u.devices.length===1?u.devices[0]:u.devices;cfg.gpu_order='as_given';cfg.gpu_roles=u.roles;cfg.gpu_cards=Object.fromEntries(u.devices.map(i=>[String(i),nameOf(i)]));return true;};
@@ -426,7 +440,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
    if(instance.status==='error')throw new Error(instance.error);
    try{const response=await fetcher(`http://127.0.0.1:${instance.port}/health`,{headers:{authorization:`Bearer ${key}`},signal:AbortSignal.timeout(2000)});if(job.state!=='running'){await unload(id);return;}if(response.ok){instance.status='ready';instance.phase='idle';
     /* Remember what this model needed on each card, for the next load's preflight (0006). */
-    if(freeBeforeLoad&&instance.gpus.length){const afterLoad=gpuMemory();if(afterLoad)for(const gpuIndex of instance.gpus){const before=freeBeforeLoad.get(gpuIndex),after=afterLoad.get(gpuIndex);if(before&&after&&before.free>after.free)recordVramNeed(args.model,[gpuIndex],before.free-after.free);}}await noteDrafting(job,instance,key);if(resources||args.vision!==undefined||JSON.stringify(cfg[USER_KEY]??null)!==JSON.stringify(config[USER_KEY]??null))writeModelConfig(record(args.model).path,{...config,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),...visionPreferences,...(cfg[USER_KEY]?{[USER_KEY]:cfg[USER_KEY]}:{})});emit();ensurePoll();instance.parallelNote=parallelNote;return {summary:retried?`${instance.label} is ready, after a second try: ${retried.words}`:`${instance.label} is ready.${parallelNote?' '+parallelNote:''}`,instanceId:id};}}catch{}
+    if(freeBeforeLoad&&instance.gpus.length){const afterLoad=gpuMemory();if(afterLoad)for(const gpuIndex of instance.gpus){const before=freeBeforeLoad.get(gpuIndex),after=afterLoad.get(gpuIndex);if(before&&after&&before.free>after.free)recordVramNeed(args.model,[gpuIndex],before.free-after.free,cfg);}}await noteDrafting(job,instance,key);if(resources||args.vision!==undefined||JSON.stringify(cfg[USER_KEY]??null)!==JSON.stringify(config[USER_KEY]??null))writeModelConfig(record(args.model).path,{...config,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),...visionPreferences,...(cfg[USER_KEY]?{[USER_KEY]:cfg[USER_KEY]}:{})});emit();ensurePoll();instance.parallelNote=parallelNote;return {summary:retried?`${instance.label} is ready, after a second try: ${retried.words}`:`${instance.label} is ready.${parallelNote?' '+parallelNote:''}`,instanceId:id};}}catch{}
    await new Promise(resolve=>setTimeout(resolve,1200));
   }
   if(job.state!=='running'){await unload(id);return;}
