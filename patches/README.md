@@ -70,3 +70,54 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Origin: http://<NAS 局域网 IP>:8
 curl -s -H 'Origin: http://<NAS 局域网 IP>:8791' http://127.0.0.1:8791/api/native | head -c 120                      # 200 + version
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Origin: http://example.com' http://127.0.0.1:8791/api/health             # 403
 ```
+
+## 0005 主卡角色必须落到引擎（2026-10-29 回归事故后固化）
+
+**事故**：0.1.52 起模型设置文件里只剩裸 `"gpu": 0`（setup 写的），没有 `gpu_roles`。host 的 `buildConfig()` 认为「文件里已经写了卡」就直接沿用 →
+引擎拿到 `CUDA_VISIBLE_DEVICES=0`，也就是 nvidia-smi 第 0 张卡（本机是 CMP 40HX 8G，不是人选的 RTX 2080 Ti 22G）；
+`card_note()` 又只在编号「错位」时打印，`0` 与引擎自己的 `GPU 0` 一致 → 日志里一行都不说，看起来像主卡选择被吞了。
+
+**语义（Rain 2026-10-29 定）**：不写死任何 index。角色表（`gpu_roles = {"0":"helper","1":"main"}`，`off` 不参与）→ 按阶段序算出物理设备集合
+（Helper 在前、Main 最后）→ 注入 `CUDA_VISIBLE_DEVICES`，引擎侧的 CUDA0 就是被选中的主卡；一卡/两卡/三卡、主卡是 0 号，都必须成立。
+解析不出角色且兜不成，就明确报错拒绝启动，绝不按引擎默认 CUDA0 硬起。
+
+**host 侧 `host/server/native-control.mjs`**
+- `rolesToDevices(roles)`：角色表 → `{devices, roles}`，要求恰好一个 `main`，helper 按编号升序在前、main 最后；
+- `lastRoles(model)`：读 `native-instances/*.json` 里该模型**最近一次**记录过角色的实例，只继承**主卡**、其余置 `off`（绝不顺手占用别人在用的卡）；
+- `buildConfig()` 在原有 `args.gpuRoles` / `args.gpus` 两条分支之后加兜底 `else`：
+  1. 屏幕上选过（`args.gpuRoles` / `args.gpus`）→ 原样采用；
+  2. 文件里有 `gpu_roles` → 按角色重算 `gpu`/`gpu_order`/`gpu_cards`（防止文件里 `gpu` 与角色不一致）；
+  3. 都没有 → `lastRoles()` 继承上次主卡；
+  4. 仍然解不出、且机器 >1 张卡、文件只命名 ≤1 张卡 → **throw**：`Choose the Main card (Main / Helper / Off per card) in Settings -> the card roles screen, then load again.`；
+  5. 单卡机器 → 直接用那张卡。
+- `loadEngine()` 写出实例配置后 `console.log('[fnOS] ' + mainCardNote)`，note 固定三样：`roles: {...} | physical: [...] | CUDA_VISIBLE_DEVICES=...`。
+
+**上游 Python `control/serve/server.py`**
+- `gpu_names_by_index()`（`lru_cache`）：`nvidia-smi --query-gpu=index,name` 查一次，给启动行带上卡名；
+- `card_note()`：**只要给了卡就打印**（含 `gpu: 0` 这种编号一致的情况），并输出 `roles GPU 0=off, GPU 1=main;` + 物理卡名 + `CUDA_VISIBLE_DEVICES`，例如：
+  `[strata] roles GPU 0=off, GPU 1=main; running on GPU 1 (NVIDIA GeForce RTX 2080 Ti) (as nvidia-smi numbers it, CUDA_VISIBLE_DEVICES=1); the engine's log calls it GPU 0 / CUDA0`
+- `log_card_note(cfg, note)`：`card_note()` 的那一行除了打控制台，也**追加写进运行日志**（`cfg["log"]`）——应用里能看到的日志
+  就是这份，只有控制台等于没人看得见；
+- `control/serve/test_server.py::GpuChoice` 同步改为「编号一致也要打印」。
+
+**离线验证（不需要卡、不需要模型）**：`scripts/test-gpu-roles.py` 从 `native-control.mjs` 里逐行原样抽出 `roleList` /
+`rolesToDevices`，用 `node --test` 跑 6 个用例：主卡=0（单卡可见集 `[0]`）、主卡=1、主卡+副卡（helper 在前 `[0,1]` / `[2,3]`）、
+`off` 卡永不出现、无 main/双 main 返回 null（对应「拒绝启动」）、三卡机主卡在任意 index。`node --test` 6/6 通过，
+已接进 `scripts/build.sh` 的 `[2.6/3]`，改坏即构建失败。
+
+**守卫**：`scripts/build.sh` 的 `[2.6/3] 补丁守卫：主卡落到引擎` 硬断言 `rolesToDevices` / `lastRoles` / `mainCardNote=\`roles` / `CUDA0. Choose the Main card` / `def gpu_names_by_index` / `CUDA_VISIBLE_DEVICES={visible}`，外加 `node --check` 与 Python `ast.parse`。
+
+**验收（装机后「加载模型」）**：日志里应同时出现三样 —— `[fnOS] roles: ... | physical: [...] | CUDA_VISIBLE_DEVICES=...`、
+`[strata] roles GPU x=main; running on GPU x (<卡名>) ... CUDA_VISIBLE_DEVICES=x`、引擎自己的 `GPU 0 / CUDA0`。
+
+**装机实证（0.2.7.3，2026-10-29 19:46 加载 swift-iq3_s）**：
+```
+info.log:392   [fnOS] roles restored from the last run (other cards Off): {"0":"off","1":"main"} | physical: [1] | CUDA_VISIBLE_DEVICES=1
+strata-swift-iq3_s.log:568  [strata] roles GPU 0=off, GPU 1=main; running on GPU 1 (NVIDIA GeForce RTX 2080 Ti) (as nvidia-smi numbers it, CUDA_VISIBLE_DEVICES=1); the engine's log calls it GPU 0
+引擎自身       GPU 0: NVIDIA GeForce RTX 2080 Ti, compute capability 7.5
+```
+实例 `ready`；验完立即卸载，`nvidia-smi` 显示 GPU1 回落 299MiB、GPU0（视频平台）全程未被触碰。
+
+**tune 文件缺 `gpu_roles` 的根因**：`writeTuneConfig()` 写的正是 `buildConfig()` 出来的 cfg，而旧 `buildConfig()` 只在屏幕传了 `gpuRoles` 时才产出
+`gpu_roles`；setup 生成的设置文件只有 `gpu`，于是 tune 文件也跟着没有角色 —— 属**上游设计缺口**（不是我们改坏的回归），已由本补丁一并覆盖：
+现在任何一次 load/tune 出去都带 `gpu_roles`。

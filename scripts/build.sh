@@ -52,6 +52,35 @@ if command -v node >/dev/null 2>&1; then
 fi
 echo "  ✓ 局域网 Origin 补丁在位"
 
+# ── 2.6) 补丁守卫：主卡选择必须落到引擎（2026-10-29 回归事故：0.1.52 起主卡存成裸 "gpu": 0，引擎跑到 40HX 上）──
+echo "[2.6/3] 补丁守卫：主卡落到引擎 ..."
+NC_JS="$APP/host/server/native-control.mjs"
+grep -q 'function rolesToDevices' "$NC_JS" || {
+  echo "✗ $NC_JS 缺角色→设备解析补丁（rolesToDevices 0 命中）——上游同步把它丢了"; \
+  echo "  按 patches/README.md 的 0005 重放后再构建"; exit 1; }
+grep -q 'mainCardNote=`roles' "$NC_JS" || {
+  echo "✗ 角色补丁不完整（mainCardNote 没写出角色/物理卡/CUDA_VISIBLE_DEVICES 三样）"; exit 1; }
+grep -q 'CUDA0. Choose the Main card' "$NC_JS" || {
+  echo "✗ 角色补丁缺「解析不出就拒绝启动」的拦截"; exit 1; }
+grep -q 'function lastRoles' "$NC_JS" || {
+  echo "✗ 角色补丁缺 lastRoles 兜底（上次运行的主卡）"; exit 1; }
+SRV_PY="$APP/control/serve/server.py"
+grep -q 'def gpu_names_by_index' "$SRV_PY" || {
+  echo "✗ $SRV_PY 缺卡名日志补丁（gpu_names_by_index 0 命中）"; \
+  echo "  按 patches/README.md 的 0005 重放后再构建"; exit 1; }
+python3 "$ROOT/scripts/test-gpu-roles.py" || {
+  echo "✗ 主卡角色映射没通过（一卡/主卡 0 号/主卡+副卡都要成立）"; exit 1; }
+grep -q 'def log_card_note' "$SRV_PY" || {
+  echo "✗ card_note 没写进运行日志（角色那一行只会在控制台，日志里看不到）"; exit 1; }
+grep -q 'CUDA_VISIBLE_DEVICES={visible}' "$SRV_PY" || {
+  echo "✗ 卡名日志补丁不完整（card_note 没把 CUDA_VISIBLE_DEVICES 打进日志）"; exit 1; }
+if command -v node >/dev/null 2>&1; then
+  node --check "$NC_JS" || { echo "✗ $NC_JS 语法检查失败"; exit 1; }
+fi
+"$APP/control/python/bin/python3.12" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$SRV_PY" \
+  || { echo "✗ $SRV_PY 语法检查失败"; exit 1; }
+echo "  ✓ 主卡选取 + 卡名日志补丁在位"
+
 # ── 3) fnpack ──
 echo "[3/3] fnpack 打包 ..."
 sed -i "s/^version .*=.*/version               = $VERSION/" "$ROOT/fnpack/manifest"

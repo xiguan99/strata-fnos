@@ -223,6 +223,28 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
  const DS_EXPERTS_MIN=[0,1,50];
  function dsEngineVersion(config){const m=/engine-dsv41[\\/](\d+(?:\.\d+)+)-/.exec(String(config?.exe??''))||/engine-dsv41[\\/](\d+(?:\.\d+)+)-/.exec(String((config?.lib_dirs??[])[0]??''));return m?m[1].split('.').map(Number):null;}
  function dsExpertsSupported(config){const v=dsEngineVersion(config);if(!v)return false;for(let i=0;i<DS_EXPERTS_MIN.length;i++){const a=v[i]??0,b=DS_EXPERTS_MIN[i];if(a!==b)return a>b;}return true;}
+ /* fnOS patch 0005 (2026-10-29, Rain): the card ROLES a person chose are what the engine gets. Each role names a physical card the way
+    nvidia-smi numbers it; the engine is handed those physical numbers in stage order (Helpers first, the Main card LAST) and sees them as its own
+    compact CUDA0.. . Nothing here knows a card number: "gpu": 0 in a settings file is a bare index, not a choice, so it never decides alone - and
+    when no roles and no earlier choice can be resolved on a machine with several cards, the load stops and says so instead of running on CUDA0.
+    scripts/build.sh guards this block (0005). */
+ const roleList=roles=>Object.entries(roles??{}).filter(([k,v])=>Number.isInteger(Number(k))&&['main','helper','off'].includes(String(v).toLowerCase())).map(([k,v])=>[Number(k),String(v).toLowerCase()]).sort((a,b)=>a[0]-b[0]);
+ function rolesToDevices(roles){
+  const on=roleList(roles).filter(([,r])=>r!=='off'), mains=on.filter(([,r])=>r==='main').map(([i])=>i);
+  if(mains.length!==1)return null;                                    /* exactly one Main card, or the roles do not describe a start */
+  const helpers=on.filter(([,r])=>r==='helper').map(([i])=>i).sort((a,b)=>a-b);   /* Helpers first (stage order), the Main card last */
+  return {devices:[...helpers,...mains],roles:Object.fromEntries(roleList(roles))};
+ }
+ /* The Main card of the last run of this model: the latest instance that recorded card roles. Only the Main card is carried over - the other
+    cards stay Off, so a card another program uses is never taken without a person saying so in the roles screen. */
+ function lastRoles(model){
+  try{
+   const dir=join(directory,'native-instances');
+   const files=readdirSync(dir).filter(f=>f.endsWith('.json')).map(f=>({f,at:statSync(join(dir,f)).mtimeMs})).sort((a,b)=>b.at-a.at);
+   for(const file of files){const saved=readJson(join(dir,file.f),{});if(model&&saved.model&&saved.model!==model)continue;const roles=roleList(saved.gpu_roles);const main=roles.find(([,r])=>r==='main');if(!main)continue;return Object.fromEntries(roles.map(([i])=>[String(i),i===main[0]?'main':'off']));}
+  }catch{}
+  return null;
+ }
  function buildConfig(args,config){
   const vision=runtimeVision(config,args.vision);
   const visionPreferences=args.vision!==undefined?{ui_vision_enabled:args.vision!=='no',ui_vision_device:args.vision==='no'?config.ui_vision_device??'yes':args.vision}:{};
@@ -234,10 +256,34 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   const resources=args.resourceProfile&&!ownEngine(config)?resourceSettings({...base0,[USER_KEY]:mine,vision},snapshot.hardware,args.resourceProfile,modelArena(args.model),values0):null;
   const cfg={...config,...visionPreferences,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),host:'127.0.0.1',open_browser:false,...validateNativeSettings(args.values??{}),vision};
   /* The app's suggested cards only fill a gap: a model whose settings file already names its GPUs ("gpu": [1, 0], with "gpu_order": "as_given") keeps them (#3256). A card the person picked in the screen always wins. */
+  let mainCardNote=null;
   const namedInFile=(Array.isArray(config.gpu)?config.gpu.length>0:config.gpu!==undefined&&config.gpu!==null&&config.gpu!=='')||!!config.gpu_roles;
   /* Roles chosen in the screen (Main / Helper / Off per card, gpu-roles.mjs): the card list is the roles' mirror - Helpers first, the Main card LAST, Off cards left out - with "gpu_roles" beside it. Every card Off is allowed: the server says plainly what the engine can do. */
   if(args.gpuRoles!==undefined){const make=snapshot.hardware?.engine_vendor,cards=(snapshot.hardware?.gpus??[]).filter(g=>!make||!g.vendor||g.vendor===make),named=parseRoles(args.gpuRoles);if(!named)throw new Error('Choose Main, Helper or Off for each graphics card, with one Main.');const known=new Set(cards.map(g=>g.index));if(Object.keys(named).some(k=>!known.has(Number(k))))throw new Error('Choose detected graphics cards.');const roles=Object.fromEntries(cards.map(g=>[g.index,named[g.index]??'off'])),m=mirrorRoles(roles,cards);for(const k of ['gpu','gpu_order','gpu_none','gpu_roles','gpu_cards','hip_ordinal'])delete cfg[k];Object.assign(cfg,m);const count=Array.isArray(m.gpu)?m.gpu.length:m.gpu_none?0:1;cfg.layer_split=count>1?validateNativeSettings({layer_split:args.layerSplit??'auto'}).layer_split:'auto';if(cfg.layer_split!=='auto'&&cfg.layer_split.split(',').length!==count-1)throw new Error('Choose one layer split point between each pair of GPUs.');}
   else   if(args.gpus!==undefined&&!(args.gpusFromRecommendation&&namedInFile)){const detected=new Set((snapshot.hardware?.gpus??[]).map(g=>g.index));if(!Array.isArray(args.gpus)||!args.gpus.length||new Set(args.gpus).size!==args.gpus.length||args.gpus.some(g=>!Number.isInteger(g)||!detected.has(g)))throw new Error('Choose distinct detected GPUs. CPU-only text inference is not supported by this native adapter.');cfg.gpu=args.gpus.length===1?args.gpus[0]:args.gpus;for(const k of ['gpu_roles','gpu_cards','gpu_none'])delete cfg[k];delete cfg.hip_ordinal;cfg.layer_split=args.gpus.length>1?validateNativeSettings({layer_split:args.layerSplit??'auto'}).layer_split:'auto';if(cfg.layer_split!=='auto'&&cfg.layer_split.split(',').length!==args.gpus.length-1)throw new Error('Choose one layer split point between each pair of GPUs.');}
+  /* fnOS patch 0005: roles -> physical devices -> the engine's CUDA_VISIBLE_DEVICES, whatever the card numbers are on this machine. */
+  else   {
+    const cards=(snapshot.hardware?.gpus??[]).filter(g=>g.backend!=='cpu');
+    const known=new Set(cards.map(g=>g.index));
+    const nameOf=i=>String(cards.find(g=>g.index===i)?.name??`GPU ${i}`);
+    const write=roles=>{const usable=Object.fromEntries(roleList(roles).filter(([i])=>known.has(i)));const u=rolesToDevices(usable);if(!u)return false;for(const k of ['gpu','gpu_order','gpu_none','gpu_roles','gpu_cards','hip_ordinal'])delete cfg[k];cfg.gpu=u.devices.length===1?u.devices[0]:u.devices;cfg.gpu_order='as_given';cfg.gpu_roles=u.roles;cfg.gpu_cards=Object.fromEntries(u.devices.map(i=>[String(i),nameOf(i)]));return true;};
+    if(args.gpuRoles!==undefined||args.gpus!==undefined){
+      /* The person chose in the screen: their cards, kept as chosen (one card, or several, Main card last). */
+      if(cards.length>1)mainCardNote=`roles: ${JSON.stringify(cfg.gpu_roles??{})} | physical: ${JSON.stringify(Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu])} | CUDA_VISIBLE_DEVICES=${(Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu]).join(',')}`;
+    }else if(cfg.gpu_roles&&write(cfg.gpu_roles)){
+      mainCardNote=`roles: ${JSON.stringify(cfg.gpu_roles)} | physical: ${JSON.stringify(Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu])} | CUDA_VISIBLE_DEVICES=${(Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu]).join(',')}`;
+    }else{
+      /* No roles in the file and nothing chosen now: the Main card of the last run of this model is the person's last choice; a bare "gpu": 0 is not. */
+      const prior=lastRoles(args.model);
+      if(prior!==null&&write(prior)){
+        mainCardNote=`roles restored from the last run (other cards Off): ${JSON.stringify(cfg.gpu_roles)} | physical: ${JSON.stringify(Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu])} | CUDA_VISIBLE_DEVICES=${(Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu]).join(',')}`;
+      }else{
+        const named=Array.isArray(cfg.gpu)?cfg.gpu.filter(n=>Number.isInteger(n)):(Number.isInteger(cfg.gpu)?[cfg.gpu]:[]);
+        if(cards.length>1&&named.length<=1)throw new Error('This machine has '+cards.length+' graphics cards but the saved settings name no card roles (only "gpu": '+JSON.stringify(cfg.gpu)+'), so the engine would quietly start on CUDA0. Choose the Main card (Main / Helper / Off per card) in Settings -> the card roles screen, then load again.');
+        if(cards.length===1&&named.length<=1)mainCardNote=`single card GPU ${cards[0].index} (${nameOf(cards[0].index)}) | CUDA_VISIBLE_DEVICES=${cards[0].index}`;
+      }
+    }
+  }
   if(cfg.vram_reserve_mib!==undefined&&cfg.vram_reserve_mib!==null){cfg.args=[...(cfg.args??[])];const at=cfg.args.indexOf('--vram-reserve-mib');if(at>=0)cfg.args.splice(at,2);cfg.args.push('--vram-reserve-mib',String(cfg.vram_reserve_mib));}
   if(mine.length){cfg.args=mergeUserArgs(cfg.args??[],mine);cfg[USER_KEY]=mine;}else delete cfg[USER_KEY];
   if(cfg.vision){if(cfg.vision_tokens!=null)cfg.vision={...cfg.vision,max_tokens:cfg.vision_tokens};if(cfg.vision_min_tokens!=null)cfg.vision={...cfg.vision,min_tokens:cfg.vision_min_tokens};}cfg.mcp={...(cfg.mcp??{}),...(cfg.mcp_timeout_s!=null?{timeout_s:cfg.mcp_timeout_s}:{}),...(cfg.mcp_max_rounds!=null?{max_rounds:cfg.mcp_max_rounds}:{}),...(cfg.mcp_max_result_chars!=null?{max_result_chars:cfg.mcp_max_result_chars}:{})};
@@ -254,7 +300,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   /* DeepSeek's Speed choice: the engine decides by itself (--experts auto: 5 when the cards total 16 GB or less, else 6), so nothing is passed unless the person chose 5 or 6. */
   if(ownEngine(config)){const list=[];const old=Array.isArray(cfg.args)?cfg.args:[];for(let i=0;i<old.length;i++){if(old[i]==='--experts'){i++;continue;}list.push(old[i]);}if(dsExpertsSupported(config)&&(cfg.ds_experts==='5'||cfg.ds_experts==='6'))list.push('--experts',cfg.ds_experts);else if(!dsExpertsSupported(config)&&old.includes('--experts'))list.splice(0,list.length,...old);cfg.args=list;delete cfg.ds_experts;}
   else delete cfg.ds_experts;
-  return {cfg,resources,visionPreferences,parallelChoice,parallelNote};
+  return {cfg,resources,visionPreferences,parallelChoice,parallelNote,mainCardNote};
  }
  /* The DFlash2 drafter, before a load that uses it: Control says whether the choice needs it (and the file is not here), downloads it pinned and checked, and packs it, with plain progress in the job.
     Never stops the load: a drafter that cannot be had leaves the MTP running, and the job says so. The choice itself is remembered in the model's settings file. */
@@ -279,7 +325,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   await refresh(true);if(job.state!=='running')return;const {entry,path:configFile}=recordFile(args.model);const config=checkedSettingsConfig(readFileSync(configFile,'utf8'));if(packaged){const engine=await control.engine();if(!engine.usable)throw new Error(ENGINE_NOT_RECOGNISED+(engine.notice?` ${engine.notice}`:''));}if(!entry.ready){const error=missingFilesError(args.model,entry.missing);append(args.model,error.details[0]);throw error;}
   if(externalRunning().length)throw new Error('A Strata server is already running outside this UI. Stop it before loading here, or connect its API in Settings → Models.');
   if(args.multiple&&instances.size>=8)throw new Error('Unload an instance before adding another. Up to eight native instances can run here.');
-  const {cfg,resources,visionPreferences,parallelChoice,parallelNote:chosenNote}=buildConfig(args,config);
+  const {cfg,resources,visionPreferences,parallelChoice,parallelNote:chosenNote,mainCardNote}=buildConfig(args,config);
   let parallelNote=chosenNote;
   await prepareDrafter(job,args,cfg,configFile);if(job.state!=='running')return;
   const fingerprint=createHash('sha256').update(JSON.stringify({...cfg,api_key:undefined,port:undefined})).digest('hex');
@@ -296,6 +342,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   if(!args.multiple){if(busy(requests().filter(r=>instances.has(r.instanceId))))throw new Error('Finish or cancel native requests before switching models.');for(const id of [...instances.keys()])await unload(id);}else if(matching)await unload(matching.id);
   if(job.state!=='running')return;
   writeFileSync(configPath,JSON.stringify(cfg,null,2),{mode:0o600});
+  if(mainCardNote)console.log(`[fnOS] ${mainCardNote}`);
   const instance={id,apiModelId,fingerprint,context:entry.context??0,aliases:cfg.aliases??[],vision:!!cfg.vision,resourceProfile:cfg.ui_resource_profile??null,model:args.model,label:friendlyModelName(snapshot.catalog,args.model)??entry.model_name??args.model,port:cfg.port,gpus:Array.isArray(cfg.gpu)?cfg.gpu:cfg.gpu===undefined?[]:[cfg.gpu],status:'loading',phase:'loading',parallel:cfg.parallel??1,mcpServers:cfg.mcp_servers??cfg.mcpServers??{},key,configPath,loadedAt:new Date().toISOString(),metrics:null,error:null};
   /* Another model on the same graphics card: the engine takes the card's free memory, so a second one usually finds none. Loading goes on (recommend, never force); if it fails, the reason is said. */
   const sharedWith=instance.gpus.length?[...instances.values()].find(i=>i.id!==id&&i.status!=='error'&&i.model!==args.model&&i.gpus.some(g=>instance.gpus.includes(g))):null;
