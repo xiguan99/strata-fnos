@@ -115,6 +115,17 @@ print(f"ok (class Strata {lines} 行, {len(m.Strata.__dict__)} 个成员)")
 PYCHK
 ) || { echo "✗ strata_mcp.py 自检失败：class Strata 不完整，不许出包"; exit 1; }
 
+# 0008b（2026-10-30）：前端角色表补丁必须还在，否则「网页里设第二卡辅助」又会被静默丢掉。
+# 事故：页面在 roles 为 null（用户选的正好等于推荐）时用「已加载实例的角色」压掉推荐，
+# 再把只剩 2 张卡的表当推荐发上去；服务端看到 gpusFromRecommendation 就不采用，最终仍单卡。
+BUNDLE=$(ls "$APP"/host/dist/assets/index-*.js | head -1)
+grep -q 'Je=ee.length>1?R?F$(R,ee):at.roles:at.roles' "$BUNDLE" \
+  || { echo "✗ 前端角色表补丁丢失：推荐角色又被已加载实例压掉（网页设 Helper 不生效）"; exit 1; }
+grep -q 'gpusFromRecommendation' "$BUNDLE" \
+  && { echo "✗ 前端仍走「推荐卡列表」旧路径：网页角色选择不会作为 gpuRoles 发送"; exit 1; }
+grep -q 'roles chosen in the screen' "$APP/host/server/native-control.mjs" \
+  || { echo "✗ 屏幕选角色那条路径没有角色日志行"; exit 1; }
+
 # ── 2.9) 同名版本不许覆盖：该出的新包必须 bump VERSION（2026-10-29 Rain 要求）──
 if [ -f "$ROOT/dist/strata_v${VERSION}_x86.fpk" ] && [ "${STRATA_ALLOW_REBUILD:-0}" != "1" ]; then
   echo "✗ dist/strata_v${VERSION}_x86.fpk 已存在：同一版本号不出第二个包，请先 bump VERSION（开发期覆盖请设 STRATA_ALLOW_REBUILD=1）"
