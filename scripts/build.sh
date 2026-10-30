@@ -91,8 +91,10 @@ grep -q 'native engine — models load through Strata Control' "$IDX_JS" \
   || { echo "✗ 推理横幅补丁丢失（打包版又变回 simulated 文案）"; exit 1; }
 grep -q 'vramSignature' "$NC_JS" \
   || { echo "✗ 显存台账按参数签名失效的补丁丢失（改了 --kv-resident 仍会被旧数字拦住）"; exit 1; }
-grep -q 'const limit=needed?needed+512:floor' "$NC_JS" \
+grep -q 'vram_headroom_mib??512' "$NC_JS" \
   || { echo "✗ 显存预检余量补丁丢失（会把刚好装得下的加载判死）"; exit 1; }
+grep -q 'const floor=Math.max(Number(cfg?.vram_floor_mib??2560)' "$NC_JS" \
+  || { echo "✗ 显存预检地板可配置补丁丢失（写死的 2560/1536 会回来）"; exit 1; }
 grep -q 'def _reference(value)' "$MCP_PY" \
   || { echo "✗ 安装器组件引用补丁丢失（会把整个模型误标成缺引擎）"; exit 1; }
 

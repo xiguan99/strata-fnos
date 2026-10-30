@@ -20,6 +20,15 @@ export const NATIVE_FIELDS=[
  {id:'split_skip_if_fits',label:'Use one GPU when the model fits',group:'GPU & memory',type:'boolean'},
  {id:'vram_elastic',label:'Elastic GPU expert cache',group:'GPU & memory',type:'boolean'},
  {id:'vram_reserve_mib',label:'GPU memory for other apps (MiB)',group:'GPU & memory',type:'number',min:0,max:131072,hint:'Applied as --vram-reserve-mib when loading.'},
+  {id:'vram_floor_mib',label:'Free GPU memory a first load needs (MiB)',group:'GPU & memory',type:'number',min:0,max:131072,hint:'A model that has never loaded on this card is checked against this much free memory before the start.'},
+ {id:'vram_extra_mib',label:'Free memory a first load needs beyond the reserve (MiB)',group:'GPU & memory',type:'number',min:0,max:131072,hint:'Added to the memory kept for other apps; the larger of the two is the first-load floor.'},
+ {id:'vram_headroom_mib',label:'Headroom over the memory it needed last time (MiB)',group:'GPU & memory',type:'number',min:0,max:131072,hint:'A model that loaded here before is checked against what it used plus this headroom.'},
+ {id:'kv_resident',label:'KV cells kept in GPU memory',group:'GPU & memory',type:'number',min:20480,max:1048576,hint:'Applied as --kv-resident. The engine never keeps fewer than 20480 cells per layer, so a smaller number is clamped there; more cells answer faster and take more GPU memory.'},
+ {id:'vram_reserve_later_mib',label:'GPU memory released after the prompt (MiB)',group:'GPU & memory',type:'number',min:0,max:131072,hint:'Applied as --vram-reserve-later-mib: memory the engine gives back once the prompt is read, which the expert cache of the answer then uses.'},
+ {id:'prefill',label:'Prompt reading',group:'Engine',type:'string',hint:'Applied as --prefill: auto, auto:<tokens> (for example auto:16384) or a chunk size in tokens. Leave blank for the engine default.'},
+ {id:'pool_workers',label:'Processor workers',group:'Engine',type:'number',min:0,max:256,hint:'Applied as --pool-workers. Leave blank for the engine default; 0 lets the engine choose.'},
+ {id:'host_core',label:'Processor core for the engine thread',group:'Engine',type:'enum',choices:['auto','first','last'],hint:'Applied as --host-core. Last keeps the engine thread off the cores the graphics work already uses.'},
+ {id:'spec',label:'Prompt lookup windows',group:'Engine',type:'number',min:0,max:64,hint:'Applied as --spec. Zero turns the prompt lookup off.'},
  {id:'vision_tokens',label:'Maximum image tokens',group:'Image reading',type:'number',min:1,max:16384},
  {id:'vision_min_tokens',label:'Minimum image tokens',group:'Image reading',type:'number',min:0,max:16384},
  {id:'mcp_timeout_s',label:'Tool timeout (seconds)',group:'Tools',type:'number',min:1,max:3600},
@@ -85,7 +94,24 @@ export function setSpeedSwitch(env,id,on){
 /** What the settings answer carries: each switch that applies, with its words, its default, the entries it writes outside the default, and whether the feature is on. */
 export function speedSwitchRows(env,context){return SPEED_SWITCHES.filter(s=>speedSwitchApplies(s.id,context)).map(s=>({...s,on:speedSwitchIsOn(env,s.id)}));}
 /** Settings the app itself applies when it starts a model (they are not read from the engine's source, so the engine's text never says it supports them). */
-export const APP_OWNED_FIELDS=['mtp','batchMtp','drafting','ds_experts'];
+export const APP_OWNED_FIELDS=['mtp','batchMtp','drafting','ds_experts','vram_floor_mib','vram_extra_mib','vram_headroom_mib','kv_resident','vram_reserve_later_mib','prefill','pool_workers','host_core','spec'];
+/** Settings that become an engine argument. The app writes them into the engine arguments of the model it starts, so they are edited here and applied there. */
+export const ENGINE_ARG_FIELDS=[
+ {id:'vram_reserve_mib',flag:'--vram-reserve-mib'},
+ {id:'kv_resident',flag:'--kv-resident'},
+ {id:'vram_reserve_later_mib',flag:'--vram-reserve-later-mib'},
+ {id:'prefill',flag:'--prefill'},
+ {id:'pool_workers',flag:'--pool-workers'},
+ {id:'host_core',flag:'--host-core'},
+ {id:'spec',flag:'--spec'},
+];
+/** The value of an engine argument in a list of arguments, or undefined when the list does not carry it. */
+export function engineArgValue(args,flag){
+ const list=(args??[]).map(String);const i=list.indexOf(flag);
+ if(i<0)return undefined;
+ const value=list[i+1];
+ return value===undefined||value.startsWith('--')?'':value;
+}
 /** The engine arguments without the draft layer: --mtp <folder or count>, --spec-min-p <p> (its confidence threshold) and --batch-mtp. --spec stays: prompt lookup still uses its windows. Same rule as strata_control/draft_layer.py. */
 export function withoutDraftLayer(args){
  const out=[];const list=(args??[]).map(String);
@@ -108,6 +134,7 @@ export function validateNativeSettings(values){
   if(field.type==='enum'&&!field.choices.includes(value))throw new Error(`${field.label}: choose a supported option.`);
   if(field.type==='array'&&(!Array.isArray(value)||value.length>24||value.some(v=>typeof v!=='string'||!v.trim()||v.length>80)||new Set(value).size!==value.length))throw new Error('Choose distinct model aliases, up to 80 characters each.');
   if(key==='layer_split'&&value!=='auto'){const points=value.split(',').map(Number);if(!points.length||points.some((n,i)=>!Number.isInteger(n)||n<1||n>=48||(i>0&&n<=points[i-1])))throw new Error('Layer split points must increase from 1 to 47, for example 16,32.');}
+  if(key==='prefill'&&!/^(auto|auto:\d{1,7}|\d{1,7})$/.test(value))throw new Error('Prompt reading: enter auto, auto:<tokens> or a chunk size in tokens.');
   result[key]=value;
  }
  return result;
