@@ -49,3 +49,13 @@ if (response.ok) { instance.status = 'ready'; ... }
 1. 故意只传模型名的 load 请求 → job 变 `failed`，错误里逐条列出缺哪几项，且 `instances = []`、两卡显存不变。
 2. 正常请求（页面入口，带角色/卡）→ `ready` 且四项全部成立（进程在选定卡、显存到量、日志有完成行、`loaded:true`）。
 3. 失败路径不许再出现「页面已就绪但 `nvidia-smi` 上没有进程」。
+
+## 0.2.7.12 补丁（0.2.7.11 未交付，内部作废）
+
+第一次装机验证暴露一个自身 bug：`engineLogFile()` 用 `snapshot.installDir` 拼 `install/strata-<model>.log`，
+而打包态的 `installDir` 本身就以 `/install` 结尾 → 找的是 `.../install/install/...`，永远不存在。
+结果：一个**已经正常起好的引擎**（日志里 `strata serve: 852 MiB of VRAM free with everything loaded`）
+因为「日志没写」被判定失败，5 分钟后被 stop 掉。
+
+修法：两种拼写都试（`<dir>/strata-<model>.log`、`<dir>/install/strata-<model>.log`）；
+失败文案里带上找过的目录；失败时把缺项写进 `info.log`（`[fnOS] load failed after Ns: ...`），不用翻 job 才能看到。

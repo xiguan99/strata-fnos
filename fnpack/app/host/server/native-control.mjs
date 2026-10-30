@@ -388,8 +388,11 @@ function computeApps(){
 }
 /* Control keeps each model's engine log beside its installation: install/strata-<model>.log. */
 function engineLogFile(model){
+  /* installDir already points at the "install" folder in packaged mode, so both spellings are tried. */
   const dir=snapshot.installDir??snapshot.repo??null;if(!dir)return null;
-  const file=join(dir,'install',`strata-${model}.log`);return existsSync(file)?file:null;
+  const name=`strata-${model}.log`;
+  for(const file of [join(dir,name),join(dir,'install',name)])if(existsSync(file))return file;
+  return null;
 }
 const ENGINE_READY_LINE=/with everything loaded|ready to serve|server is ready/i;
 function engineProof(instance,{model,cfg,since}){
@@ -403,7 +406,7 @@ function engineProof(instance,{model,cfg,since}){
     const short=cards.filter(index=>{const card=memory.get(index);return !card||card.total-card.free<floor;});
     if(short.length)missing.push(`GPU ${short.map(i=>i+1).join(', ')} holds less than ${floor} MiB, so the engine is not loaded there`);}
   const file=engineLogFile(model);
-  if(!file)missing.push(`the engine log for ${model} was not written`);
+  if(!file)missing.push(`the engine log for ${model} was not found (looked in ${snapshot.installDir??'the install folder'})`);
   else{let ok=false;try{const st=statSync(file);ok=st.mtimeMs>=since-5000&&ENGINE_READY_LINE.test(readFileSync(file,'utf8').slice(-40000));}catch{ok=false;}
     if(!ok)missing.push(`the engine log does not say it finished loading (${basename(file)})`);}
   return {ok:missing.length===0,missing};
@@ -498,6 +501,7 @@ function engineProof(instance,{model,cfg,since}){
   if(instance.profile)await control.stop(instance.profile).catch(()=>{});else await stopProcess(proc);
   instance.status='error';
   instance.error=`The engine did not come up: ${proofMissing.join('; ')}. Nothing is reported ready, so the model is not usable yet. Check the engine log and free memory.`;
+  append(args.model,`[fnOS] load failed after ${Math.round((Date.now()-loadStartedAt)/1000)}s: ${proofMissing.join('; ')}`);
   throw new Error(instance.error);
  }
  async function freePort(requested){for(let port=Number(requested??18500);port<=Number(requested??18500)+20;port++){if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('Choose a port from 1024 to 65535.');if([...instances.values()].some(i=>i.port===port)){if(requested)throw new Error('This private engine port is already in use.');continue;}const available=await new Promise(resolve=>{const probe=createServer();probe.once('error',()=>resolve(false));probe.listen(port,'127.0.0.1',()=>probe.close(()=>resolve(true)));});if(available)return port;if(requested)throw new Error('This private engine port is already in use.');}throw new Error('No free private engine port was found.');}
