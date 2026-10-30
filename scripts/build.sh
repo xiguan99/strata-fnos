@@ -135,6 +135,25 @@ if [ -f "$ROOT/dist/strata_v${VERSION}_x86.fpk" ] && [ "${STRATA_ALLOW_REBUILD:-
 fi
 
 # ── 3) fnpack ──
+# 0010（2026-10-31）：就绪必须外部可验 —— 不许因为 start 返回成功就报 ready。
+# 事故：Control 的 /health 在「服务在跑、引擎没起」时也返回 200 {"loaded":false}，旧判据只看 response.ok，
+# 于是页面显示「已就绪」，而 nvidia-smi 上没有任何进程、引擎日志也没有新的启动段。
+NC="$APP/host/server/native-control.mjs"
+grep -q 'healthBody.loaded===true' "$NC" \
+  || { echo "✗ 就绪判据丢了 loaded===true：/health 200 又会被当成引擎起来了"; exit 1; }
+grep -q 'function engineProof(' "$NC" \
+  || { echo "✗ 就绪的四项外部凭据（进程/显存/日志/端口）不见了"; exit 1; }
+grep -q "no engine process on GPU" "$NC" \
+  || { echo "✗ 缺「卡上没有引擎进程」这条判据"; exit 1; }
+grep -q 'The engine did not come up:' "$NC" \
+  || { echo "✗ 失败时没有逐条列出缺哪项"; exit 1; }
+grep -q "Choose a model to load." "$NC" \
+  || { echo "✗ load 请求缺少入口校验（只传半套参数也会建 job）"; exit 1; }
+if grep -q "if(response.ok){instance.status='ready'" "$NC"; then
+  echo "✗ 旧的「response.ok 即就绪」写法又回来了"; exit 1
+fi
+echo "ok (0010: 就绪四项外部凭据 + 入口校验)"
+
 echo "[3/3] fnpack 打包 ..."
 sed -i "s/^version .*=.*/version               = $VERSION/" "$ROOT/fnpack/manifest"
 cd "$ROOT/fnpack"

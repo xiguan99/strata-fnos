@@ -373,6 +373,41 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
  function rememberSetting(configFile,key,value){try{const current=readJson(configFile);if(value===null?!(key in current):current[key]===value)return;const next={...current};if(value===null)delete next[key];else next[key]=value;const temp=configFile+'.ui-tmp';writeFileSync(temp,JSON.stringify(next,null,2)+'\n',{mode:0o600});renameSync(temp,configFile);}catch{/* the load goes on with the choice for this start */}}
  /* Which drafter runs, when it is not the one that was asked for (the engine's own words, "Drafting: MTP (DFlash2 didn't fit)"): under Details of the load. */
  async function noteDrafting(job,instance,key){let note='';try{const r=await fetcher(`http://127.0.0.1:${instance.port}/metrics`,{headers:{authorization:`Bearer ${key}`},signal:AbortSignal.timeout(2000)});if(r.ok)note=String((await r.json())?.engine?.drafting_note??'');}catch{/* a convenience */}const lines=[job.drafterNote,note].filter(Boolean);if(lines.length)job.details=[job.details,...lines].filter(Boolean).join('\n');}
+/* fnOS patch 0010: a load counts as ready only when the engine can be shown to be running from outside this state
+   machine. Control's /health answers 200 with "loaded": false while its server is up and the engine is not, so the
+   old test (response.ok alone) reported ready for an engine that had never started. Four things are checked, and
+   every one that fails is named: the port answers with loaded:true, a compute process sits on the cards we chose,
+   those cards hold the memory the model needs, and the engine's own log says it finished loading. */
+function computeApps(){
+  try{const gpus=execFileSync('nvidia-smi',['--query-gpu=index,uuid','--format=csv,noheader,nounits'],{encoding:'utf8',timeout:4000});
+    const byUuid=new Map();for(const line of gpus.trim().split('\n')){const [index,uuid]=line.split(',').map(v=>v.trim());if(uuid&&Number.isInteger(Number(index)))byUuid.set(uuid,Number(index));}
+    const apps=execFileSync('nvidia-smi',['--query-compute-apps=pid,used_memory,gpu_uuid','--format=csv,noheader,nounits'],{encoding:'utf8',timeout:4000});
+    const rows=[];for(const line of apps.trim().split('\n')){if(!line.trim())continue;const [pid,used,uuid]=line.split(',').map(v=>v.trim());const index=byUuid.get(uuid);if(index===undefined)continue;rows.push({pid:Number(pid),mib:Number(used),index});}
+    return rows;
+  }catch{return null;}
+}
+/* Control keeps each model's engine log beside its installation: install/strata-<model>.log. */
+function engineLogFile(model){
+  const dir=snapshot.installDir??snapshot.repo??null;if(!dir)return null;
+  const file=join(dir,'install',`strata-${model}.log`);return existsSync(file)?file:null;
+}
+const ENGINE_READY_LINE=/with everything loaded|ready to serve|server is ready/i;
+function engineProof(instance,{model,cfg,since}){
+  const missing=[];
+  const cards=instance.gpus??[];
+  const apps=computeApps();
+  if(apps===null)missing.push('nvidia-smi could not be read, so the engine process on the cards could not be seen');
+  else if(!apps.filter(a=>cards.includes(a.index)&&a.mib>0).length)missing.push(`no engine process on GPU ${cards.length?cards.map(i=>i+1).join(', '):'(no card chosen)'}`);
+  const memory=gpuMemory();
+  if(memory&&cards.length){const need=vramNeedMib(model,cards,cfg);const floor=need?Math.max(1024,Math.round(need*0.8)):1024;
+    const short=cards.filter(index=>{const card=memory.get(index);return !card||card.total-card.free<floor;});
+    if(short.length)missing.push(`GPU ${short.map(i=>i+1).join(', ')} holds less than ${floor} MiB, so the engine is not loaded there`);}
+  const file=engineLogFile(model);
+  if(!file)missing.push(`the engine log for ${model} was not written`);
+  else{let ok=false;try{const st=statSync(file);ok=st.mtimeMs>=since-5000&&ENGINE_READY_LINE.test(readFileSync(file,'utf8').slice(-40000));}catch{ok=false;}
+    if(!ok)missing.push(`the engine log does not say it finished loading (${basename(file)})`);}
+  return {ok:missing.length===0,missing};
+}
  async function loadEngine(job,args){
   await refresh(true);if(job.state!=='running')return;const {entry,path:configFile}=recordFile(args.model);const config=checkedSettingsConfig(readFileSync(configFile,'utf8'));if(packaged){const engine=await control.engine();if(!engine.usable)throw new Error(ENGINE_NOT_RECOGNISED+(engine.notice?` ${engine.notice}`:''));}if(!entry.ready){const error=missingFilesError(args.model,entry.missing);append(args.model,error.details[0]);throw error;}
   if(externalRunning().length)throw new Error('A Strata server is already running outside this UI. Stop it before loading here, or connect its API in Settings → Models.');
@@ -437,15 +472,33 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   for(const stream of [proc.stdout,proc.stderr])stream.on('data',chunk=>{const lines=chunk.toString().split('\n').filter(Boolean);lines.forEach(line=>append(id,line.replaceAll(key,'[redacted]')));job.summary=lines.at(-1)??job.summary;emit();});
   proc.on('error',error=>{instance.status='error';instance.error=error.message;emit();});proc.on('exit',code=>{if(instances.has(id)&&instance.status!=='unloading'){instance.status='error';instance.error=`Engine stopped${code===null?'':` (exit ${code})`}. Open diagnostics or reload.`;emit();}});emit();
   }
-  const deadline=Date.now()+300000;while(Date.now()<deadline&&job.state==='running'){
+  /* fnOS patch 0010: ready means provable from outside, not "the start call returned". */
+  const loadStartedAt=Date.now();const deadline=loadStartedAt+300000;let proofMissing=['the engine never answered /health'];let healthBody=null;
+  while(Date.now()<deadline&&job.state==='running'){
    if(instance.status==='error')throw new Error(instance.error);
-   try{const response=await fetcher(`http://127.0.0.1:${instance.port}/health`,{headers:{authorization:`Bearer ${key}`},signal:AbortSignal.timeout(2000)});if(job.state!=='running'){await unload(id);return;}if(response.ok){instance.status='ready';instance.phase='idle';
+   try{const response=await fetcher(`http://127.0.0.1:${instance.port}/health`,{headers:{authorization:`Bearer ${key}`},signal:AbortSignal.timeout(2000)});if(job.state!=='running'){await unload(id);return;}
+    if(response.ok){
+     try{healthBody=await response.json();}catch{healthBody=null;}
+     if(healthBody&&healthBody.loaded===true){
+      const proof=engineProof(instance,{model:args.model,cfg,since:loadStartedAt});
+      if(proof.ok){instance.status='ready';instance.phase='idle';
     /* Remember what this model needed on each card, for the next load's preflight (0006). */
-    if(freeBeforeLoad&&instance.gpus.length){const afterLoad=gpuMemory();if(afterLoad)for(const gpuIndex of instance.gpus){const before=freeBeforeLoad.get(gpuIndex),after=afterLoad.get(gpuIndex);if(before&&after&&before.free>after.free)recordVramNeed(args.model,[gpuIndex],before.free-after.free,cfg);}}await noteDrafting(job,instance,key);if(resources||args.vision!==undefined||JSON.stringify(cfg[USER_KEY]??null)!==JSON.stringify(config[USER_KEY]??null))writeModelConfig(record(args.model).path,{...config,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),...visionPreferences,...(cfg[USER_KEY]?{[USER_KEY]:cfg[USER_KEY]}:{})});emit();ensurePoll();instance.parallelNote=parallelNote;return {summary:retried?`${instance.label} is ready, after a second try: ${retried.words}`:`${instance.label} is ready.${parallelNote?' '+parallelNote:''}`,instanceId:id};}}catch{}
+    if(freeBeforeLoad&&instance.gpus.length){const afterLoad=gpuMemory();if(afterLoad)for(const gpuIndex of instance.gpus){const before=freeBeforeLoad.get(gpuIndex),after=afterLoad.get(gpuIndex);if(before&&after&&before.free>after.free)recordVramNeed(args.model,[gpuIndex],before.free-after.free,cfg);}}await noteDrafting(job,instance,key);if(resources||args.vision!==undefined||JSON.stringify(cfg[USER_KEY]??null)!==JSON.stringify(config[USER_KEY]??null))writeModelConfig(record(args.model).path,{...config,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),...visionPreferences,...(cfg[USER_KEY]?{[USER_KEY]:cfg[USER_KEY]}:{})});emit();ensurePoll();instance.parallelNote=parallelNote;return {summary:retried?`${instance.label} is ready, after a second try: ${retried.words}`:`${instance.label} is ready.${parallelNote?' '+parallelNote:''}`,instanceId:id};}
+      else{proofMissing=proof.missing;}
+     }else{proofMissing=['Strata Control answers /health, but it reports the model is not loaded (loaded=false)'];
+      if(healthBody&&healthBody.model)proofMissing.push(`it is still serving ${healthBody.model}`);
+      /* Control said the start finished: if it still reports "not loaded" after a minute, waiting the full five
+         minutes only delays the truth. */
+      if(Date.now()-loadStartedAt>90000)break;}
+    }
+   }catch{}
    await new Promise(resolve=>setTimeout(resolve,1200));
   }
   if(job.state!=='running'){await unload(id);return;}
-  if(instance.profile)await control.stop(instance.profile).catch(()=>{});else await stopProcess(proc);instance.status='error';instance.error='Loading took more than five minutes. Check the engine log and free memory.';throw new Error(instance.error);
+  if(instance.profile)await control.stop(instance.profile).catch(()=>{});else await stopProcess(proc);
+  instance.status='error';
+  instance.error=`The engine did not come up: ${proofMissing.join('; ')}. Nothing is reported ready, so the model is not usable yet. Check the engine log and free memory.`;
+  throw new Error(instance.error);
  }
  async function freePort(requested){for(let port=Number(requested??18500);port<=Number(requested??18500)+20;port++){if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('Choose a port from 1024 to 65535.');if([...instances.values()].some(i=>i.port===port)){if(requested)throw new Error('This private engine port is already in use.');continue;}const available=await new Promise(resolve=>{const probe=createServer();probe.once('error',()=>resolve(false));probe.listen(port,'127.0.0.1',()=>probe.close(()=>resolve(true)));});if(available)return port;if(requested)throw new Error('This private engine port is already in use.');}throw new Error('No free private engine port was found.');}
  let pollCount=0;
@@ -538,7 +591,8 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   const room=args.resourceProfile==='work';
   return autotuner.start(job,job.kind==='recheck'?'recheck':'tune',{configPath:path,presetId:args.presetId,mode:args.mode,use:args.use,goal:room?'room':'speed',leaveRam:room?20:0,allowSmallDifferences:args.allowSmallDifferences===true,name:args.name},{onProgress:p=>{job.summary=p.text??job.summary;emit();}});
  }
- function operation(kind,args={}){if(!['install','load','benchmark','tune','autotune','recheck','calibrate','update-engine','update-strata','rollback','install-engine-file','remove'].includes(kind))throw new Error('Choose a supported native operation.');if(!snapshot.available&&!(packaged&&COMPONENT_KINDS.includes(kind)))throw new Error(snapshot.error??'Connect the native Strata installation first.');if(kind==='install'||kind==='load'){const refusal=engineRefusal(snapshot.catalog,args.model,snapshot.engineInfo);if(refusal)throw new Error(refusal);}return begin(kind,job=>kind==='install'?install(job,args):kind==='load'?loadEngine(job,args):kind==='benchmark'?benchmark(job,args):kind==='tune'?tune(job,args):kind==='autotune'||kind==='recheck'?autotune(job,args):kind==='remove'?removeModel(job,args):program(job,args),{guided:args.guided===true,model:args.model,...(args.family?{family:args.family}:{})});}
+ function operation(kind,args={}){if(!['install','load','benchmark','tune','autotune','recheck','calibrate','update-engine','update-strata','rollback','install-engine-file','remove'].includes(kind))throw new Error('Choose a supported native operation.');if(!snapshot.available&&!(packaged&&COMPONENT_KINDS.includes(kind)))throw new Error(snapshot.error??'Connect the native Strata installation first.');if(kind==='load'&&(typeof args.model!=='string'||!args.model.trim()))throw new Error('Choose a model to load.');/* fnOS patch 0010: no model, no job. */
+  if(kind==='install'||kind==='load'){const refusal=engineRefusal(snapshot.catalog,args.model,snapshot.engineInfo);if(refusal)throw new Error(refusal);}return begin(kind,job=>kind==='install'?install(job,args):kind==='load'?loadEngine(job,args):kind==='benchmark'?benchmark(job,args):kind==='tune'?tune(job,args):kind==='autotune'||kind==='recheck'?autotune(job,args):kind==='remove'?removeModel(job,args):program(job,args),{guided:args.guided===true,model:args.model,...(args.family?{family:args.family}:{})});}
  /* ---- The models folder card (0.2.2): what a picked folder means, and the three choices. The copying is Control's (strata models move). ---- */
  const currentModelsFolder=()=>preferences.downloadDirectory??(modelsDirectory?modelsDirectory():snapshot.installed?.data_folder)??null;
  const moveFile=()=>join(directory,'models-move.cancel');
