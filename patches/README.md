@@ -152,3 +152,11 @@ strata-swift-iq3_s.log:568  [strata] roles GPU 0=off, GPU 1=main; running on GPU
 
 `cmd/main` 的模型根可写性检查增加 `setfacl -m u:<运行用户>:rwx` 兜底（应用沙箱里 `chown` 可能被拒），
 但正确做法仍是在「应用设置 → 访问权限 → 允许访问以下文件夹」把模型根授权为**读写**。
+
+## 0012 降级加载留痕（2026-11-01）
+
+`host/server/native-control.mjs` 就绪成功点新增一行 `[fnOS] load ok after Ns: … full memory mode | LOW-MEMORY mode`。
+
+起因是 0.2.9.1 实测：arena 装不进 RAM 时引擎**不失败**，等满 `STRATA_ARENA_RAM_WAIT_S`（默认 20 s）后 control 自动降级重试，
+以「低内存模式」起来（部分权重从 SSD 读），job 仍是 `done/ready`，而 8K 预填充只有 497.4 T/s（正常 976.2）、TTFT 16 s（正常 8.2 s）。
+不写这一行的话，这种「ready 但慢一半」的实例在面板上与正常实例完全一样。详见 `0012-low-memory-log.md`。

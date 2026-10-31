@@ -157,6 +157,15 @@ if grep -q "if(response.ok){instance.status='ready'" "$NC"; then
 fi
 echo "ok (0010: 就绪四项外部凭据 + 入口校验)"
 
+# 0012（2026-11-01）：low-memory 降级加载必须留痕 —— 「ready 但只有一半速度」比 error 更难查。
+# 实测：可用内存 44 GB < arena 46 GB 时，引擎等满 STRATA_ARENA_RAM_WAIT_S 后自动降级重试，
+# job 变 done/ready，但 8K 预填充只有 497.4 T/s（正常 976.2）、TTFT 16 s（正常 8.2 s）。
+grep -q '\[fnOS\] load ok after' "$NC" \
+  || { echo "✗ 就绪成功路径缺少 load ok 证据行（低内存降级就查不出来了）"; exit 1; }
+grep -q 'LOW-MEMORY mode' "$NC" \
+  || { echo "✗ load ok 证据行没有标出 low-memory 降级状态"; exit 1; }
+echo "ok (0012: 降级加载留痕)"
+
 echo "[3/3] fnpack 打包 ..."
 sed -i "s/^version .*=.*/version               = $VERSION/" "$ROOT/fnpack/manifest"
 cd "$ROOT/fnpack"
