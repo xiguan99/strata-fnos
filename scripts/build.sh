@@ -120,11 +120,14 @@ PYCHK
 # 0008b（2026-10-30）：前端角色表补丁必须还在，否则「网页里设第二卡辅助」又会被静默丢掉。
 # 事故：页面在 roles 为 null（用户选的正好等于推荐）时用「已加载实例的角色」压掉推荐，
 # 再把只剩 2 张卡的表当推荐发上去；服务端看到 gpusFromRecommendation 就不采用，最终仍单卡。
-BUNDLE=$(ls "$APP"/host/dist/assets/index-*.js | head -1)
-grep -q 'Je=ee.length>1?R?F$(R,ee):at.roles:at.roles' "$BUNDLE" \
-  || { echo "✗ 前端角色表补丁丢失：推荐角色又被已加载实例压掉（网页设 Helper 不生效）"; exit 1; }
+# 0.2.9 起 dist 里有多个 index-*.js（懒加载 chunk），主 bundle 只能从 index.html 解析；
+# 压缩变量名每次上游构建都会变，故守卫改成**语义判据**（发 gpuRoles、不发推荐列表），不再逐字匹配压缩符号。
+BUNDLE="$APP/host/dist/$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' "$APP/host/dist/index.html" | head -1)"
+[ -f "$BUNDLE" ] || { echo "✗ 从 index.html 解析不到主 bundle"; exit 1; }
 grep -q 'gpusFromRecommendation' "$BUNDLE" \
   && { echo "✗ 前端仍走「推荐卡列表」旧路径：网页角色选择不会作为 gpuRoles 发送"; exit 1; }
+grep -q 'gpuRoles:' "$BUNDLE" \
+  || { echo "✗ 前端不再发送 gpuRoles：屏幕选的角色到不了服务端（0008 重放丢失）"; exit 1; }
 grep -q 'roles chosen in the screen' "$APP/host/server/native-control.mjs" \
   || { echo "✗ 屏幕选角色那条路径没有角色日志行"; exit 1; }
 
