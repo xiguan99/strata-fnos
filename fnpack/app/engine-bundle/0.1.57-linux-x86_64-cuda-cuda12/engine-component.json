@@ -2,7 +2,7 @@
  "schema_version": 2,
  "id": "strata-engine",
  "name": "strata-engine",
- "version": "0.1.55",
+ "version": "0.1.57",
  "platform": "linux-x86_64",
  "backend": "cuda",
  "archs": [
@@ -18,18 +18,18 @@
  "min_driver": {
   "nvidia": "575.51"
  },
- "build_id": "99866a47a2b8+cuda12.9",
+ "build_id": "0bdcef4682c5+cuda12.9",
  "entrypoint": "strata",
  "files": [
   {
    "path": "strata",
-   "sha256": "27875ca813f962daab2e8299fce1664bc4769e1554e9c588e2f0f04b936c908b",
-   "bytes": 485059856
+   "sha256": "6ad0bfcc07fec7f456771dd9fc676428e71de1af6a94c0d54488dce808c4355a",
+   "bytes": 520242000
   },
   {
    "path": "BUILD.json",
-   "sha256": "0496eb36b004c0022c6ebc6b6173fec748eb6efbad1917a623876e359da60a9d",
-   "bytes": 206
+   "sha256": "a7fe357dd1ebdb6537d2d7d790abc6edb2792cb1334eba9457cfb3ab9a9fb68a",
+   "bytes": 207
   },
   {
    "path": "SYSTEM-LIBS.txt",
@@ -53,19 +53,19 @@
   },
   {
    "path": "libstrata_kq.so",
-   "sha256": "7175a941e5dc5f8bc43b206144bcf7385140ff5c2cb052d1a457502e0a0dfb9f",
+   "sha256": "9df9b7b86733ab57842ba8f4e10ac988ab4f2270725ea7ae296738e64f011632",
    "bytes": 50864280
   },
   {
    "path": "strata-vision",
-   "sha256": "7566b0c27e69ba48fd4a4b6ae2a1b957a68ea1c576a079cdff330eb0a18307d1",
-   "bytes": 155419432
+   "sha256": "fd82b66e71eacbff7e20ec6420eda0c9c12cdb6359e0394167bb4da5430b94be",
+   "bytes": 155431720
   }
  ],
  "signature": {
   "alg": "ed25519",
   "key_id": "5d1bc23abbeffd0d",
-  "value": "Tpr/A1vA49v4lej8BtqCS/knNs5W1PM0+Gx3f1KzCCMla6VZhWmj5kWchAgxJgDG5mMiEpwZU/cBs0lDgyy/AA=="
+  "value": "uT6wUAlxKk+Q7pS1YOg2RyS2VJBeNXYwLwwsWiM9ZGMrClSIeCGYEKtSoEAFYzQ5POkeM6cyuzCyEd6W3zbcDQ=="
  },
  "variant": "cuda12"
 }

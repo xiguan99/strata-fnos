@@ -8,9 +8,9 @@ export const NATIVE_FIELDS=[
  {id:'aliases',label:'API model aliases',group:'Serving',type:'array',hint:'Comma-separated names clients may use for this model.'},
  {id:'idle_unload_s',label:'Unload after idle seconds',group:'Serving',type:'number',min:0,max:86400,hint:'Zero keeps the model loaded.'},
  {id:'lazy_load',label:'Load on first request',group:'Serving',type:'boolean'},
- {id:'mtp',label:'Draft layer (MTP)',group:'Serving',type:'boolean',hint:'The draft layer guesses several words ahead, which makes answers faster, and costs about 1 GB of graphics memory and some RAM. Turn it off if the model stops while it starts, or the card is small: the expert cache gets that memory back and answers are slower. Default is on.'},
- {id:'drafting',label:'Drafting',group:'Serving',type:'enum',choices:['auto','mtp','dflash2','off'],hint:'Which drafter guesses words ahead to make answers faster. Auto (recommended) lets Strata pick from what it measured on cards like yours; today that is the MTP. DFlash2 is for Qwen3.8-Flash-Next only and downloads a 1.2 GB drafter once. If DFlash2 cannot run, the MTP is used and Details says why. Off turns the draft layer off.'},
- {id:'batchMtp',label:'MTP per request',group:'Serving',type:'boolean',hint:'Each concurrent request uses the draft layer. Left alone, Strata turns it on for one graphics card with 24 GB or more and several requests at once, and off otherwise; choose on or off here to decide yourself.'},
+ {id:'mtp',notForModel:'deepseek',label:'Draft layer (MTP)',group:'Serving',type:'boolean',hint:'The draft layer guesses several words ahead, which makes answers faster, and costs about 1 GB of graphics memory and some RAM. Turn it off if the model stops while it starts, or the card is small: the expert cache gets that memory back and answers are slower. Default is on.'},
+ {id:'drafting',notForModel:'deepseek',label:'Drafting',group:'Serving',type:'enum',choices:['auto','mtp','dflash2','off'],hint:'Which drafter guesses words ahead to make answers faster, one at a time. Auto (recommended) is DFlash2 for Qwen3.8-Flash-Next where the engine has it, the MTP otherwise; on two or more identical graphics cards that the all-cards split engine takes, it is that engine with the MTP draft layer. DFlash2 downloads a 1.2 GB drafter once, the MTP its draft layer once. With Auto, several requests at once use the MTP. If you choose DFlash2 yourself, it runs with the number of requests you set. If DFlash2 cannot run, the MTP is used alone and Details says why. Off turns the drafter off.'},
+ {id:'batchMtp',notForModel:'deepseek',label:'MTP per request',group:'Serving',type:'boolean',hint:'Each concurrent request uses the draft layer. Left alone, Strata turns it on for one graphics card with 24 GB or more and several requests at once, and off otherwise; choose on or off here to decide yourself.'},
  {id:'ds_experts',label:'Speed (DeepSeek)',group:'Serving',type:'enum',choices:['5','6'],forModel:'deepseek',hint:'Faster uses 5 of 6 experts per word: a small quality change, usually not noticeable. Full quality uses all 6. Left alone, the engine picks Faster on a PC whose graphics cards total 16 GB or less.'},
  {id:'parallel',label:'Concurrent requests',group:'Serving',type:'number',min:1,max:8,hint:'More slots need more memory and can slow each response.'},
  {id:'engine_silence_s',label:'Engine stall timeout (seconds)',group:'Recovery',type:'number',min:10,max:3600},
@@ -96,6 +96,17 @@ export function setSpeedSwitch(env,id,on){
 export function speedSwitchRows(env,context){return SPEED_SWITCHES.filter(s=>speedSwitchApplies(s.id,context)).map(s=>({...s,on:speedSwitchIsOn(env,s.id)}));}
 /** Settings the app itself applies when it starts a model (they are not read from the engine's source, so the engine's text never says it supports them). */
 export const APP_OWNED_FIELDS=['mtp','batchMtp','drafting','ds_experts','vram_floor_mib','vram_extra_mib','vram_headroom_mib','kv_resident','vram_reserve_later_mib','prefill','pool_workers','host_core','spec'];
+/** The families that have a Drafting choice and the model names the DFlash2 drafter was made for (strata_control/drafting.py SUPPORTED_FAMILIES, _SUPPORTED_NAME): Qwen3.8-Flash-Next, Gyro and Unsloth's quantizations of the same weights; not Swift, Coder or NVFP4. */
+export const DRAFTING_FAMILIES=['qwen','gyro','unsloth'];
+const DFLASH2_MODEL=/^qwen3\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\d[a-z0-9_.]*)?$/i;
+/** The drafter a choice means (one per run; strata_control/drafting.py choice_of): Auto is DFlash2 where the engine has it (`served`, Control's word) and the model is one it was made for, else the MTP; off and mtp are what they say. `model` is a run config's model name or a family. */
+/** `split` (Control's plan: the all-cards split engine will take this start) makes Auto the MTP, the draft layer that engine runs; a DFlash2 the person chose by name stays. */
+export function resolveDrafter(choice,model,served,split){
+ const c=String(choice??'auto').toLowerCase();if(c==='off'||c==='mtp')return c;
+ const name=String(model??'');if(!(served===true&&(DRAFTING_FAMILIES.includes(name.toLowerCase())||DFLASH2_MODEL.test(name))))return 'mtp';
+ return split===true&&c!=='dflash2'?'mtp':'dflash2';
+}
+/** The engine arguments without the draft layer: --mtp <folder or count>, --spec-min-p <p> (its confidence threshold) and --batch-mtp. --spec stays: prompt lookup still uses its windows. Same rule as strata_control/draft_layer.py. */
 /** Settings that become an engine argument. The app writes them into the engine arguments of the model it starts, so they are edited here and applied there. */
 export const ENGINE_ARG_FIELDS=[
  {id:'vram_reserve_mib',flag:'--vram-reserve-mib'},
@@ -113,7 +124,6 @@ export function engineArgValue(args,flag){
  const value=list[i+1];
  return value===undefined||value.startsWith('--')?'':value;
 }
-/** The engine arguments without the draft layer: --mtp <folder or count>, --spec-min-p <p> (its confidence threshold) and --batch-mtp. --spec stays: prompt lookup still uses its windows. Same rule as strata_control/draft_layer.py. */
 export function withoutDraftLayer(args){
  const out=[];const list=(args??[]).map(String);
  for(let i=0;i<list.length;i++){const a=list[i];if(a==='--batch-mtp')continue;if(a==='--mtp'||a==='--spec-min-p'){if(i+1<list.length&&!list[i+1].startsWith('--'))i++;continue;}out.push(a);}
@@ -134,8 +144,8 @@ export function validateNativeSettings(values){
   if(field.type==='string'&&(typeof value!=='string'||value.length>256))throw new Error(`${field.label}: enter at most 256 characters.`);
   if(field.type==='enum'&&!field.choices.includes(value))throw new Error(`${field.label}: choose a supported option.`);
   if(field.type==='array'&&(!Array.isArray(value)||value.length>24||value.some(v=>typeof v!=='string'||!v.trim()||v.length>80)||new Set(value).size!==value.length))throw new Error('Choose distinct model aliases, up to 80 characters each.');
-  if(key==='layer_split'&&value!=='auto'){const points=value.split(',').map(Number);if(!points.length||points.some((n,i)=>!Number.isInteger(n)||n<1||n>=48||(i>0&&n<=points[i-1])))throw new Error('Layer split points must increase from 1 to 47, for example 16,32.');}
   if(key==='prefill'&&!/^(auto|auto:\d{1,7}|\d{1,7})$/.test(value))throw new Error('Prompt reading: enter auto, auto:<tokens> or a chunk size in tokens.');
+  if(key==='layer_split'&&value!=='auto'){const points=value.split(',').map(Number);if(!points.length||points.some((n,i)=>!Number.isInteger(n)||n<1||n>=48||(i>0&&n<=points[i-1])))throw new Error('Layer split points must increase from 1 to 47, for example 16,32.');}
   result[key]=value;
  }
  return result;

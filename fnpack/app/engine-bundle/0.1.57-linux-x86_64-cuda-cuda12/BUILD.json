@@ -1,0 +1,1 @@
+{"version": "0.1.57", "source": "f-0214-int 0bdcef4682c5", "archs": [60, 61, 70, 75, 80, 86, 89], "vision_archs": "60;61;70;75;80;86;89", "ptx": true, "cuda": "12.9", "portable": true, "vision": "cuda12.9"}

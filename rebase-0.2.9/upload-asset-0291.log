@@ -1,0 +1,20 @@
+[2026-11-03 12:36:18] start upload strata_v0.2.9.1_x86.fpk (1148417832 B)
+[2026-11-03 12:54:44] upload HTTP=000
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/assets-final.json'
+[2026-11-03 12:54:44] verify rc=1
+[2026-11-03 13:05:32] local check: size=1148417832 sha256=ab37b181feb5e6dc7df7636487cb4135aed7c4f20a14f66bede77a0a872c6f4a
+[2026-11-03 13:05:32] local check OK
+[2026-11-03 13:05:32] === attempt 1/4 ===
+[2026-11-03 13:05:34] deleted stale asset 704302815 HTTP=204
+[2026-11-03 13:27:58] upload HTTP=201
+[2026-11-03 13:27:58] upload succeeded on attempt 1
+name  : strata_v0.2.9.1_x86.fpk
+state : uploaded
+size  : 1148417832 (expect 1148417832 ) OK
+digest: sha256:ab37b181feb5e6dc7df7636487cb4135aed7c4f20a14f66bede77a0a872c6f4a
+sha   : ab37b181feb5e6dc7df7636487cb4135aed7c4f20a14f66bede77a0a872c6f4a OK
+url   : https://github.com/xiguan99/strata-fnos/releases/download/v0.2.9.1/strata_v0.2.9.1_x86.fpk
+RESULT: PASS
+[2026-11-03 13:27:59] verify rc=0
