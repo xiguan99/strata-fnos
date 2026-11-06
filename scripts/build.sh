@@ -22,6 +22,8 @@ ffmpeg -y -v error -i "$SRC_ICON" -vf "scale=256:256:flags=lanczos" "$APP/ui/ima
 ffmpeg -y -v error -i "$SRC_ICON" -vf "scale=64:64:flags=lanczos"   "$APP/ui/images/icon_64.png"
 cp "$APP/ui/images/icon_256.png" "$ROOT/fnpack/ICON.PNG"
 cp "$APP/ui/images/icon_256.png" "$ROOT/fnpack/ICON_256.PNG"
+# 构建期 import 会留下带构建机路径的 .pyc（2026-10-29 事故：pyc 把本机路径带进包）
+find "$APP" -path "$APP/control/python/lib" -prune -o -name "__pycache__" -type d -print -exec rm -rf {} + 2>/dev/null || true
 # 断链清理（安装器遍历全树设权限，断链会炸）
 n=$(find "$APP" -xtype l | wc -l); [ "$n" -gt 0 ] && { find "$APP" -xtype l -delete; echo "  清理断链 $n 个"; }
 
@@ -75,6 +77,10 @@ grep -q 'def gpu_names_by_index' "$SRV_PY" || {
   echo "  按 patches/README.md 的 0005 重放后再构建"; exit 1; }
 python3 "$ROOT/scripts/test-gpu-roles.py" || {
   echo "✗ 主卡角色映射没通过（一卡/主卡 0 号/主卡+副卡都要成立）"; exit 1; }
+if grep -q 'functools\.' "$SRV_PY"; then
+  grep -q '^import functools' "$SRV_PY" || {
+    echo "✗ $SRV_PY 用了 functools 但没 import functools（0.2.11 事故：引擎子进程 import 即崩，模型起不来）"; exit 1; }
+fi
 grep -q 'def log_card_note' "$SRV_PY" || {
   echo "✗ card_note 没写进运行日志（角色那一行只会在控制台，日志里看不到）"; exit 1; }
 grep -q 'CUDA_VISIBLE_DEVICES={visible}' "$SRV_PY" || {

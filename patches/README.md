@@ -124,6 +124,8 @@ strata-swift-iq3_s.log:568  [strata] roles GPU 0=off, GPU 1=main; running on GPU
 
 ## 0006 角色为空不许兜底到 0 号卡 + 启动前显存预检（2026-10-29 第二次回归后固化）
 
+**`gpu_names_by_index()` 不要加 `@functools.lru_cache` 装饰器**：`serve/server.py` 没有 `import functools`，加了会让引擎子进程 import 即崩（`NameError: name 'functools' is not defined`，页面报「Second try: one request at a time」，模型永远起不来）。真要缓存就同时补 `import functools`，`scripts/build.sh` 有硬断言。
+
 0005 上线后 Rain 用**真实入口**（页面「加载模型」）验收，日志仍是 `roles: {} | physical: [0]`，引擎落到 40HX 上退出 1。
 根因不是角色解析写错，而是**「这是不是人选的」判错了**：
 
