@@ -1,13 +1,13 @@
 /** Native Strata control plane. All user actions are explicit; opening the UI only reads state. */
 import {missingFilesError,missingNames} from './missing-files.mjs';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {chooseParallel,applyParallel,withoutParallel,FALLBACK_NOTE} from './native-parallel.mjs';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync, copyFileSync, renameSync, rmSync, statfsSync, unlinkSync, chmodSync, statSync, accessSync, constants } from 'node:fs';
 import { join, resolve, dirname, basename, sep, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
-import { NATIVE_FIELDS, APP_OWNED_FIELDS, ENGINE_ARG_FIELDS, engineArgValue, withoutDraftLayer, resolveDrafter, validateNativeSettings, validateMcpServers, publicMcpServers, publicNativeEnv, restoreNativeEnv, speedSwitchRows } from './native-settings.mjs';
+import { NATIVE_FIELDS, APP_OWNED_FIELDS, withoutDraftLayer, resolveDrafter, validateNativeSettings, validateMcpServers, publicMcpServers, publicNativeEnv, restoreNativeEnv, speedSwitchRows } from './native-settings.mjs';
 import { resourceSettings, saferStart, reserveChoice } from './native-resources.mjs';
 import { USER_KEY, capture as captureUserArgs, merge as mergeUserArgs, setFlag as setUserFlag, stamped as stampedUserArgs } from './native-user-args.mjs';
 import { resolvePython, venvPython } from './python-resolver.mjs';
@@ -163,8 +163,8 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
  async function openSettingsFile(model,options={}){const info=settingsFile(model);await openTextFile(info.path,options);return info;}
  /* A mistake in the file holds the start back with the line, instead of an engine that dies on it. Warnings (an unknown key) never do. */
  function checkedSettingsConfig(text){const check=checkAndParseRunConfig(text);if(!check.ok)throw new Error(`The settings file for this model has a mistake, so the model was not started. ${describeIssues(check.issues,'error').join(' ')}`);return check.config;}
- function settings(model){const {entry,config}=record(model);const values=Object.fromEntries(NATIVE_FIELDS.map(f=>[f.id,config[f.id]??null]));for(const f of ENGINE_ARG_FIELDS){if(values[f.id]!=null)continue;const raw=engineArgValue(config.args,f.flag);if(raw===undefined)continue;const field=NATIVE_FIELDS.find(x=>x.id===f.id);values[f.id]=field&&field.type==='number'?(raw!==''&&Number.isFinite(Number(raw))?Number(raw):null):(raw===''?null:raw);}if(typeof values.aliases==='string')values.aliases=values.aliases.split(',').map(v=>v.trim()).filter(Boolean);values.sampling=config.sampling??{};values.args=config.args??[];values.env=publicNativeEnv(config.env??{});return {model,values,mcp:publicMcpServers(config.mcp_servers??config.mcpServers??{}),restartNeeded:true,capabilities:{dsExperts:ownEngine(config)&&dsExpertsSupported(config)},speedSwitches:speedSwitchRows(config.env??{},{deepseek:ownEngine(config),arch:config.arch??null,backend:config.backend??entry?.backend??snapshot.installed?.engine?.backend??null,gpus:snapshot.hardware?.gpus??[]})};}
- function save(model,{values,mcp}){if([...jobs.values()].some(j=>j.state==='running'))throw new Error('Finish the current operation before saving native settings.');const {path,config}=record(model);if(busy(requests().filter(r=>instances.get(r.instanceId)?.model===model)))throw new Error('Finish this model’s requests before saving its settings.');const patch=validateNativeSettings(values??{}),next={...config};if(patch.ds_experts!=null&&!dsExpertsSupported(config))throw new Error('The Speed choice needs the newer DeepSeek engine. Update the engine in Settings, then choose it.');for(const field of nativeFields())if(field.supported===false&&patch[field.id]!=null&&JSON.stringify(patch[field.id])!==JSON.stringify(config[field.id]))throw new Error(`${field.label} needs a newer native Strata installation. Update it in Settings → About.`);for(const [key,value] of Object.entries(patch)){if(key==='env')next.env=restoreNativeEnv(value,config.env??{});else if(value===null)delete next[key];else next[key]=value;}if(ENGINE_ARG_FIELDS.some(f=>f.id in patch)){let mine=captureUserArgs(next);let argv=next.args??[];for(const f of ENGINE_ARG_FIELDS){if(!(f.id in patch))continue;const value=patch[f.id]===null?null:String(patch[f.id]);mine=setUserFlag(mine,f.flag,value);argv=setUserFlag(argv,f.flag,value);}if(mine.length)next[USER_KEY]=mine;else delete next[USER_KEY];next.args=argv;delete next.ui_reserve_applied;if(Array.isArray(next.args_written))next.args_written=[...argv];}if(mcp!==undefined){next.mcp_servers=validateMcpServers(mcp,config.mcp_servers??config.mcpServers??{});delete next.mcpServers;}copyFileSync(path,path+'.bak');chmodSync(path+'.bak',0o600);const temp=path+'.ui-tmp';writeFileSync(temp,JSON.stringify(next,null,2)+'\n',{mode:0o600});renameSync(temp,path);return settings(model);}
+ function settings(model){const {entry,config}=record(model);const values=Object.fromEntries(NATIVE_FIELDS.map(f=>[f.id,config[f.id]??null]));if(typeof values.aliases==='string')values.aliases=values.aliases.split(',').map(v=>v.trim()).filter(Boolean);values.sampling=config.sampling??{};values.args=config.args??[];values.env=publicNativeEnv(config.env??{});return {model,values,mcp:publicMcpServers(config.mcp_servers??config.mcpServers??{}),restartNeeded:true,capabilities:{dsExperts:ownEngine(config)&&dsExpertsSupported(config)},speedSwitches:speedSwitchRows(config.env??{},{deepseek:ownEngine(config),arch:config.arch??null,backend:config.backend??entry?.backend??snapshot.installed?.engine?.backend??null,gpus:snapshot.hardware?.gpus??[]})};}
+ function save(model,{values,mcp}){if([...jobs.values()].some(j=>j.state==='running'))throw new Error('Finish the current operation before saving native settings.');const {path,config}=record(model);if(busy(requests().filter(r=>instances.get(r.instanceId)?.model===model)))throw new Error('Finish this model’s requests before saving its settings.');const patch=validateNativeSettings(values??{}),next={...config};if(patch.ds_experts!=null&&!dsExpertsSupported(config))throw new Error('The Speed choice needs the newer DeepSeek engine. Update the engine in Settings, then choose it.');for(const field of nativeFields())if(field.supported===false&&patch[field.id]!=null&&JSON.stringify(patch[field.id])!==JSON.stringify(config[field.id]))throw new Error(`${field.label} needs a newer native Strata installation. Update it in Settings → About.`);for(const [key,value] of Object.entries(patch)){if(key==='env')next.env=restoreNativeEnv(value,config.env??{});else if(value===null)delete next[key];else next[key]=value;}if('vram_reserve_mib' in patch){const base=captureUserArgs(next);const mine=setUserFlag(base,'--vram-reserve-mib',patch.vram_reserve_mib);if(mine.length)next[USER_KEY]=mine;else delete next[USER_KEY];next.args=mine.length&&patch.vram_reserve_mib!==null?mergeUserArgs(next.args??[],mine):setUserFlag(next.args??[],'--vram-reserve-mib',null);delete next.ui_reserve_applied;if(Array.isArray(next.args_written))next.args_written=[...next.args];}if(mcp!==undefined){next.mcp_servers=validateMcpServers(mcp,config.mcp_servers??config.mcpServers??{});delete next.mcpServers;}copyFileSync(path,path+'.bak');chmodSync(path+'.bak',0o600);const temp=path+'.ui-tmp';writeFileSync(temp,JSON.stringify(next,null,2)+'\n',{mode:0o600});renameSync(temp,path);return settings(model);}
  function previousEngine(){if(packaged)return !!snapshot.engine?.previous;try{const data=snapshot.installed?.data_dir??snapshot.installed?.data_folder;return [join(preferences.repo,'engine/.previous'),data&&join(data,'engine/.previous')].filter(Boolean).some(existsSync)&&readFileSync(join(preferences.repo,'setup.py'),'utf8').includes('--rollback-engine');}catch{return false;}}
  async function plan(args){await refresh();if(!snapshot.available)throw new Error(snapshot.error);const result=await tool('strata_install',installArgs(args,false));
   /* A chosen drafter that is not on this computer yet is part of the download: its size is listed beside the model's (Control decides; nothing is fetched here). */
@@ -237,74 +237,6 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
  const DS_EXPERTS_MIN=[0,1,50];
  function dsEngineVersion(config){const m=/engine-dsv41[\\/](\d+(?:\.\d+)+)-/.exec(String(config?.exe??''))||/engine-dsv41[\\/](\d+(?:\.\d+)+)-/.exec(String((config?.lib_dirs??[])[0]??''));return m?m[1].split('.').map(Number):null;}
  function dsExpertsSupported(config){const v=dsEngineVersion(config);if(!v)return false;for(let i=0;i<DS_EXPERTS_MIN.length;i++){const a=v[i]??0,b=DS_EXPERTS_MIN[i];if(a!==b)return a>b;}return true;}
- /* fnOS patch 0005 (2026-10-29, Rain): the card ROLES a person chose are what the engine gets. Each role names a physical card the way
-    nvidia-smi numbers it; the engine is handed those physical numbers in stage order (Helpers first, the Main card LAST) and sees them as its own
-    compact CUDA0.. . Nothing here knows a card number: "gpu": 0 in a settings file is a bare index, not a choice, so it never decides alone - and
-    when no roles and no earlier choice can be resolved on a machine with several cards, the load stops and says so instead of running on CUDA0.
-    scripts/build.sh guards this block (0005). */
- const roleList=roles=>Object.entries(roles??{}).filter(([k,v])=>Number.isInteger(Number(k))&&['main','helper','off'].includes(String(v).toLowerCase())).map(([k,v])=>[Number(k),String(v).toLowerCase()]).sort((a,b)=>a[0]-b[0]);
- function rolesToDevices(roles){
-  const on=roleList(roles).filter(([,r])=>r!=='off'), mains=on.filter(([,r])=>r==='main').map(([i])=>i);
-  if(mains.length!==1)return null;                                    /* exactly one Main card, or the roles do not describe a start */
-  const helpers=on.filter(([,r])=>r==='helper').map(([i])=>i).sort((a,b)=>a-b);   /* Helpers first (stage order), the Main card last */
-  return {devices:[...helpers,...mains],roles:Object.fromEntries(roleList(roles))};
- }
- /* The Main card of the last run of this model: the latest instance that recorded card roles. Only the Main card is carried over - the other
-    cards stay Off, so a card another program uses is never taken without a person saying so in the roles screen. */
- function lastRoles(model){
-  try{
-   const dir=join(directory,'native-instances');
-   const files=readdirSync(dir).filter(f=>f.endsWith('.json')).map(f=>({f,at:statSync(join(dir,f)).mtimeMs})).sort((a,b)=>b.at-a.at);
-   for(const file of files){const saved=readJson(join(dir,file.f),{});if(model&&saved.model&&saved.model!==model)continue;const roles=roleList(saved.gpu_roles);const main=roles.find(([,r])=>r==='main');if(!main)continue;return Object.fromEntries(roles.map(([i])=>[String(i),i===main[0]?'main':'off']));}
-  }catch{}
-  return null;
- }
-  /* fnOS patch 0006: what a card can take, and how much this model needed there when it last loaded.
-    A load onto a card that cannot take the model is refused in words a person can act on - the engine would otherwise
-    start, report "slot 0's session does not fit on CUDA0" and exit 1, which looks like a broken model. */
- function gpuMemory(){
-   try{const out=execFileSync('nvidia-smi',['--query-gpu=index,memory.total,memory.free','--format=csv,noheader,nounits'],{encoding:'utf8',timeout:4000});
-     const map=new Map();for(const line of out.trim().split('\n')){const [index,total,free]=line.split(',').map(v=>Number(v.trim()));if(Number.isInteger(index))map.set(index,{total,free});}return map;}
-   catch{return null;}
- }
- function vramLedger(){return readJson(join(directory,'native-vram.json'),{});}
- /* The figure a load left behind only describes the arguments it ran with: change --kv-resident or --max-context and the old figure is history, so the
-    record is stamped with a signature of the memory-relevant arguments and ignored once they differ (0006). */
- function vramSignature(cfg){
-   const args=Array.isArray(cfg?.args)?cfg.args:[];
-   const watched=new Set(['--max-context','--kv-resident','--batch','--parallel','--mtp','--vram-reserve-mib','--resident-experts','--mmap-experts','--expert-cache','--pool-workers']);
-   const kept=[];
-   for(let i=0;i<args.length;i++){const flag=String(args[i]);if(!watched.has(flag))continue;kept.push(flag+'='+String(args[i+1]??''));i+=1;}
-   return kept.join(' ');
- }
- function vramNeedMib(model,cards,cfg){
-   const ledger=(vramLedger()[model]??{});const mine=vramSignature(cfg);
-   return Math.max(0,...cards.map(index=>{const row=ledger[String(index)];if(!row)return 0;return String(row.sig??'')===mine?Number(row.mib??0):0;}));
- }
- function recordVramNeed(model,cards,usedMib,cfg){if(!cards.length||!(usedMib>0))return;
-   try{const ledger=vramLedger();ledger[model]??={};let changed=false;
-     const sig=vramSignature(cfg);
-     for(const index of cards){ledger[model][String(index)]={mib:Math.round(usedMib),at:new Date().toISOString(),sig};changed=true;}
-     if(changed)writeFileSync(join(directory,'native-vram.json'),JSON.stringify(ledger,null,2)+'\n',{mode:0o600});
-   }catch{/* only the next load's advice depends on it */}}
- /* The cards a start would get, and whether they can take it: null means "go ahead". */
- function vramRefusal(model,devices,cfg){
-   const cards=(devices??[]).filter(Number.isInteger);if(!cards.length)return null;
-   const memory=gpuMemory();if(!memory)return null;                       /* no nvidia-smi: say nothing, do not block a start */
-   const needed=vramNeedMib(model,cards),reserve=Number(cfg?.vram_reserve_mib??1024);
-   const floor=Math.max(Number(cfg?.vram_floor_mib??2560),reserve+Number(cfg?.vram_extra_mib??1536));                               /* first load of a model here: a conservative floor */
-   const limit=needed?needed+Number(cfg?.vram_headroom_mib??512):floor;   /* a measured need plus the same 512 MiB the engine wants as headroom */
-   for(const index of cards){const card=memory.get(index);if(!card)continue;
-     if(card.free<limit)return `GPU ${index} (${card.total} MiB in all, ${card.free} MiB free) cannot take this model: `
-       +(needed?`it needed ${needed} MiB there when it last loaded. `:`a load needs at least ${floor} MiB free. `)
-       +'Choose another Main card in Settings -> the card roles screen, or lower the context / the KV resident cells, then load again.';
-   }
-   return null;
- }
- /* The roles the last autotune run wrote for this model: a saved choice when the settings file lost them (0006). */
- function lastTuneRoles(model){
-   try{const saved=readJson(join(directory,'native-tune',`${model}.json`),{});const roles=roleList(saved.gpu_roles);return roles.length?Object.fromEntries(roles):null;}catch{return null;}
- }
  /* Control's ceiling for one start wait, read from the Control this app actually found rather than guessed from its version. The
     app starts a model with `strata runtime start --wait`, and that wait is checked three times before the engine is reached: by
     management.runtime_action, by the operation record written before the start (journal), and by runtime.start itself. 27cbbfe6
@@ -361,40 +293,10 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   const resources=args.resourceProfile&&!ownEngine(config)?resourceSettings({...base0,[USER_KEY]:mine,vision},snapshot.hardware,args.resourceProfile,modelArena(args.model),values0):null;
   const cfg={...config,...visionPreferences,...(args.contextChosen===true?{ui_context_chosen:true}:{}),...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),host:'127.0.0.1',open_browser:false,...validateNativeSettings(args.values??{}),vision};
   /* The app's suggested cards only fill a gap: a model whose settings file already names its GPUs ("gpu": [1, 0], with "gpu_order": "as_given") keeps them (#3256). A card the person picked in the screen always wins. */
-  for(const f of ENGINE_ARG_FIELDS){const value=cfg[f.id];if(value===undefined||value===null||value==='')continue;mine=setUserFlag(mine,f.flag,String(value));}
-  let mainCardNote=null;
   const namedInFile=((Array.isArray(config.gpu)?config.gpu.length>0:config.gpu!==undefined&&config.gpu!==null&&config.gpu!=='')||!!config.gpu_roles)&&!setupPickedOneCard(config,snapshot.hardware);
   /* Roles chosen in the screen (Main / Helper / Off per card, gpu-roles.mjs): the card list is the roles' mirror - Helpers first, the Main card LAST, Off cards left out - with "gpu_roles" beside it. Every card Off is allowed: the server says plainly what the engine can do. */
   if(args.gpuRoles!==undefined){const make=snapshot.hardware?.engine_vendor,cards=(snapshot.hardware?.gpus??[]).filter(g=>!make||!g.vendor||g.vendor===make),named=parseRoles(args.gpuRoles);if(!named)throw new Error('Choose Main, Helper or Off for each graphics card, with one Main.');const known=new Set(cards.map(g=>g.index));if(Object.keys(named).some(k=>!known.has(Number(k))))throw new Error('Choose detected graphics cards.');const roles=Object.fromEntries(cards.map(g=>[g.index,named[g.index]??'off'])),m=mirrorRoles(roles,cards);for(const k of ['gpu','gpu_order','gpu_none','gpu_roles','gpu_cards','hip_ordinal'])delete cfg[k];Object.assign(cfg,m);const count=Array.isArray(m.gpu)?m.gpu.length:m.gpu_none?0:1;cfg.layer_split=count>1?validateNativeSettings({layer_split:args.layerSplit??'auto'}).layer_split:'auto';if(cfg.layer_split!=='auto'&&cfg.layer_split.split(',').length!==count-1)throw new Error('Choose one layer split point between each pair of GPUs.');}
   else   if(args.gpus!==undefined&&!(args.gpusFromRecommendation&&namedInFile)){const detected=new Set((snapshot.hardware?.gpus??[]).map(g=>g.index));if(!Array.isArray(args.gpus)||!args.gpus.length||new Set(args.gpus).size!==args.gpus.length||args.gpus.some(g=>!Number.isInteger(g)||!detected.has(g)))throw new Error('Choose distinct detected GPUs. CPU-only text inference is not supported by this native adapter.');cfg.gpu=args.gpus.length===1?args.gpus[0]:args.gpus;for(const k of ['gpu_roles','gpu_cards','gpu_none'])delete cfg[k];delete cfg.hip_ordinal;cfg.layer_split=args.gpus.length>1?validateNativeSettings({layer_split:args.layerSplit??'auto'}).layer_split:'auto';if(cfg.layer_split!=='auto'&&cfg.layer_split.split(',').length!==args.gpus.length-1)throw new Error('Choose one layer split point between each pair of GPUs.');}
-  /* fnOS patch 0005: roles -> physical devices -> the engine's CUDA_VISIBLE_DEVICES, whatever the card numbers are on this machine. */
-  else   {
-    /* fnOS patch 0006c: a refresh can land before the hardware probe does; ask the probe directly rather than see no cards (an empty list cannot refuse a start either). */
-    const cards=((snapshot.hardware?.gpus?.length?snapshot.hardware:{gpus:hardwareProbe()??[]}).gpus??[]).filter(g=>g.backend!=='cpu');
-    const known=new Set(cards.map(g=>g.index));
-    const nameOf=i=>String(cards.find(g=>g.index===i)?.name??`GPU ${i}`);
-    const write=roles=>{const usable=Object.fromEntries(roleList(roles).filter(([i])=>known.has(i)));const u=rolesToDevices(usable);if(!u)return false;for(const k of ['gpu','gpu_order','gpu_none','gpu_roles','gpu_cards','hip_ordinal'])delete cfg[k];cfg.gpu=u.devices.length===1?u.devices[0]:u.devices;cfg.gpu_order='as_given';cfg.gpu_roles=u.roles;cfg.gpu_cards=Object.fromEntries(u.devices.map(i=>[String(i),nameOf(i)]));return true;};
-    const say=what=>{const shown=Array.isArray(cfg.gpu)?cfg.gpu:[cfg.gpu];if(cards.length>1)mainCardNote=`${what}: ${JSON.stringify(cfg.gpu_roles??{})} | physical: ${JSON.stringify(shown)} | CUDA_VISIBLE_DEVICES=${shown.join(',')}`;};
-    /* Only a ROLES TABLE with a Main card, or a card list a person picked, is a choice. An empty table ({}) and a recommendation
-       the screen made (gpusFromRecommendation on a settings file that names cards) are not - they must fall through to the roles. */
-    const choseRoles=args.gpuRoles!==undefined&&roleList(args.gpuRoles).length>0;
-    const choseCards=args.gpus!==undefined&&!(args.gpusFromRecommendation&&namedInFile);
-    if(choseRoles&&write(args.gpuRoles))say('roles chosen in the screen');
-    else if(choseCards&&roleList(cfg.gpu_roles??args.gpuRoles).length)say('cards chosen in the screen');
-    else if(cfg.gpu_roles&&roleList(cfg.gpu_roles).length&&write(cfg.gpu_roles))say('roles from the saved settings');
-    else{
-      /* No usable roles anywhere: the Main card of the last run of this model (or of its last autotune) is the person's last
-         choice; a bare "gpu": 0 in a settings file is not. Falling back to CUDA0 is what picked the wrong card in 0.1.52. */
-      const prior=lastRoles(args.model)??lastTuneRoles(args.model);
-      if(prior!==null&&write(prior))say('roles restored from the last run (other cards Off)');
-      else{
-        const named=Array.isArray(cfg.gpu)?cfg.gpu.filter(n=>Number.isInteger(n)):(Number.isInteger(cfg.gpu)?[cfg.gpu]:[]);
-        if(cards.length>1&&named.length<=1)throw new Error('This machine has '+cards.length+' graphics cards but the saved settings name no card roles (only "gpu": '+JSON.stringify(cfg.gpu)+'), so the engine would quietly start on CUDA0. Choose the Main card (Main / Helper / Off per card) in Settings -> the card roles screen, then load again.');
-        if(cards.length===1&&named.length<=1)mainCardNote=`single card GPU ${cards[0].index} (${nameOf(cards[0].index)}) | CUDA_VISIBLE_DEVICES=${cards[0].index}`;
-        else say('cards from the saved settings');
-      }
-    }
-  }
   if(cfg.vram_reserve_mib!==undefined&&cfg.vram_reserve_mib!==null){cfg.args=[...(cfg.args??[])];const at=cfg.args.indexOf('--vram-reserve-mib');if(at>=0)cfg.args.splice(at,2);cfg.args.push('--vram-reserve-mib',String(cfg.vram_reserve_mib));}
   if(mine.length){cfg.args=mergeUserArgs(cfg.args??[],mine);cfg[USER_KEY]=mine;}else delete cfg[USER_KEY];
   if(cfg.vision){if(cfg.vision_tokens!=null)cfg.vision={...cfg.vision,max_tokens:cfg.vision_tokens};if(cfg.vision_min_tokens!=null)cfg.vision={...cfg.vision,min_tokens:cfg.vision_min_tokens};}cfg.mcp={...(cfg.mcp??{}),...(cfg.mcp_timeout_s!=null?{timeout_s:cfg.mcp_timeout_s}:{}),...(cfg.mcp_max_rounds!=null?{max_rounds:cfg.mcp_max_rounds}:{}),...(cfg.mcp_max_result_chars!=null?{max_result_chars:cfg.mcp_max_result_chars}:{})};
@@ -416,7 +318,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
    const built=dsEngineArgs(cfg.args);cfg.args=built.args;dsNote=dsArgsNote(built);
    if(Array.isArray(cfg[USER_KEY])){const kept=dsUserArgs(cfg[USER_KEY]);if(kept.length)cfg[USER_KEY]=kept;else delete cfg[USER_KEY];}}
   else delete cfg.ds_experts;
-  return {cfg,resources,visionPreferences,parallelChoice,parallelNote,dsNote,mainCardNote};
+  return {cfg,resources,visionPreferences,parallelChoice,parallelNote,dsNote};
  }
  /* One drafter per run. Control (strata_control/drafting.py) says which one this load runs and whether its file is on this computer: the plan of the saved model file with the choice the Load carries. */
  /* The engines this Load is about to unload (the load below unloads every instance unless it adds one beside them): their graphics memory is given back before the new engine starts, so Control must not count it as busy memory when it asks whether the all-cards split engine fits (`--engines-unloading`; the Terminal does the same, Runner.card_probe). A model added beside the others (`multiple`) keeps their memory busy. */
@@ -521,45 +423,6 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   await refresh(true);
   return {summary:'The picture files are ready.'};
  }
-
-/* fnOS patch 0010: a load counts as ready only when the engine can be shown to be running from outside this state
-   machine. Control's /health answers 200 with "loaded": false while its server is up and the engine is not, so the
-   old test (response.ok alone) reported ready for an engine that had never started. Four things are checked, and
-   every one that fails is named: the port answers with loaded:true, a compute process sits on the cards we chose,
-   those cards hold the memory the model needs, and the engine's own log says it finished loading. */
-function computeApps(){
-  try{const gpus=execFileSync('nvidia-smi',['--query-gpu=index,uuid','--format=csv,noheader,nounits'],{encoding:'utf8',timeout:4000});
-    const byUuid=new Map();for(const line of gpus.trim().split('\n')){const [index,uuid]=line.split(',').map(v=>v.trim());if(uuid&&Number.isInteger(Number(index)))byUuid.set(uuid,Number(index));}
-    const apps=execFileSync('nvidia-smi',['--query-compute-apps=pid,used_memory,gpu_uuid','--format=csv,noheader,nounits'],{encoding:'utf8',timeout:4000});
-    const rows=[];for(const line of apps.trim().split('\n')){if(!line.trim())continue;const [pid,used,uuid]=line.split(',').map(v=>v.trim());const index=byUuid.get(uuid);if(index===undefined)continue;rows.push({pid:Number(pid),mib:Number(used),index});}
-    return rows;
-  }catch{return null;}
-}
-/* Control keeps each model's engine log beside its installation: install/strata-<model>.log. */
-function engineLogFile(model){
-  /* installDir already points at the "install" folder in packaged mode, so both spellings are tried. */
-  const dir=snapshot.installDir??snapshot.repo??null;if(!dir)return null;
-  const name=`strata-${model}.log`;
-  for(const file of [join(dir,name),join(dir,'install',name)])if(existsSync(file))return file;
-  return null;
-}
-const ENGINE_READY_LINE=/with everything loaded|ready to serve|server is ready/i;
-function engineProof(instance,{model,cfg,since}){
-  const missing=[];
-  const cards=instance.gpus??[];
-  const apps=computeApps();
-  if(apps===null)missing.push('nvidia-smi could not be read, so the engine process on the cards could not be seen');
-  else if(!apps.filter(a=>cards.includes(a.index)&&a.mib>0).length)missing.push(`no engine process on GPU ${cards.length?cards.map(i=>i+1).join(', '):'(no card chosen)'}`);
-  const memory=gpuMemory();
-  if(memory&&cards.length){const need=vramNeedMib(model,cards,cfg);const floor=need?Math.max(1024,Math.round(need*0.8)):1024;
-    const short=cards.filter(index=>{const card=memory.get(index);return !card||card.total-card.free<floor;});
-    if(short.length)missing.push(`GPU ${short.map(i=>i+1).join(', ')} holds less than ${floor} MiB, so the engine is not loaded there`);}
-  const file=engineLogFile(model);
-  if(!file)missing.push(`the engine log for ${model} was not found (looked in ${snapshot.installDir??'the install folder'})`);
-  else{let ok=false;try{const st=statSync(file);ok=st.mtimeMs>=since-5000&&ENGINE_READY_LINE.test(readFileSync(file,'utf8').slice(-40000));}catch{ok=false;}
-    if(!ok)missing.push(`the engine log does not say it finished loading (${basename(file)})`);}
-  return {ok:missing.length===0,missing};
-}
  async function loadEngine(job,args){
   await refresh(true);if(job.state!=='running')return;const {entry,path:configFile}=recordFile(args.model);let config=checkedSettingsConfig(readFileSync(configFile,'utf8'));if(packaged){const engine=await control.engine();if(!engine.usable)throw new Error(ENGINE_NOT_RECOGNISED+(engine.notice?` ${engine.notice}`:''));}if(!entry.ready){const error=missingFilesError(args.model,entry.missing);append(args.model,error.details[0]);throw error;}
   if(externalRunning().length)throw new Error('A Strata server is already running outside this UI. Stop it before loading here, or connect its API in Settings → Models.');
@@ -571,7 +434,7 @@ function engineProof(instance,{model,cfg,since}){
   if(drafts?.mtp_needed===true&&(args.values?.drafting!==undefined||drafts.split===true&&(config.drafting==null||String(config.drafting).toLowerCase()==='auto'))){/* the Models screen's own Load carries the choice; a plain Auto load fetches the layer too when Control says the all-cards split engine will take the start (it runs the MTP and nothing else): the same as the Terminal */await installMtpLayer(job,args,config);if(job.state!=='running')return;await refresh(true);config=checkedSettingsConfig(readFileSync(recordFile(args.model).path,'utf8'));drafts=await draftPlan(args,configFile);
    /* The draft layer for the split could not be had (no internet, disk): the load goes on as the 0.2.10 app did, the normal layer split with the plan DFlash2's again (the Models screen's own Load fetches that drafter below). One plain line says so. */
    if(drafts?.split===true&&drafts.mtp_needed===true){noSplit=true;job.drafterNote=job.drafterNote??'The MTP drafter could not be downloaded.';job.summary='Loading the model…';emit();drafts=await draftPlan(args,configFile,{noSplit:true});}}
-  const {cfg,resources,visionPreferences,parallelChoice,parallelNote:chosenNote,dsNote,mainCardNote}=buildConfig(args,config,drafts?.choice==='dflash2'&&drafts.needed===true&&args.values?.drafting===undefined?'mtp':drafts?.choice??null);/* (a drafter that is not here and will not be fetched by this load: the MTP runs, and the request slots stay) */
+  const {cfg,resources,visionPreferences,parallelChoice,parallelNote:chosenNote,dsNote}=buildConfig(args,config,drafts?.choice==='dflash2'&&drafts.needed===true&&args.values?.drafting===undefined?'mtp':drafts?.choice??null);/* (a drafter that is not here and will not be fetched by this load: the MTP runs, and the request slots stay) */
   let parallelNote=chosenNote;
   await prepareDrafter(job,args,cfg,configFile,drafts,{noSplit});if(job.state!=='running')return;
   const fingerprint=createHash('sha256').update(JSON.stringify({...cfg,api_key:undefined,port:undefined})).digest('hex');
@@ -588,11 +451,6 @@ function engineProof(instance,{model,cfg,since}){
   if(!args.multiple){if(busy(requests().filter(r=>instances.has(r.instanceId))))throw new Error('Finish or cancel native requests before switching models.');for(const id of [...instances.keys()])await unload(id);}else if(matching)await unload(matching.id);
   if(job.state!=='running')return;
   writeFileSync(configPath,JSON.stringify(cfg,null,2),{mode:0o600});
-  if(mainCardNote)console.log(`[fnOS] ${mainCardNote}`);
-  /* fnOS patch 0006: a card that cannot take this model stops the load here, with the numbers, instead of the engine
-     starting and exiting 1 with "slot 0's session does not fit". Measured after the other models were unloaded. */
-  const freeBeforeLoad=gpuMemory();
-  {const refusal=vramRefusal(args.model,placement,cfg);if(refusal){job.error=refusal;console.log(`[fnOS] ${refusal}`);throw new Error(refusal);}}
   const instance={id,apiModelId,fingerprint,context:entry.context??0,aliases:cfg.aliases??[],vision:!!cfg.vision,resourceProfile:cfg.ui_resource_profile??null,model:args.model,label:friendlyModelName(snapshot.catalog,args.model)??entry.model_name??args.model,port:cfg.port,gpus:Array.isArray(cfg.gpu)?cfg.gpu:cfg.gpu===undefined?[]:[cfg.gpu],status:'loading',phase:'loading',parallel:cfg.parallel??1,mcpServers:cfg.mcp_servers??cfg.mcpServers??{},key,configPath,loadedAt:new Date().toISOString(),metrics:null,error:null,...(picturesNote?{picturesNote}:{})};
   /* Another model on the same graphics card: the engine takes the card's free memory, so a second one usually finds none. Loading goes on (recommend, never force); if it fails, the reason is said. */
   const sharedWith=instance.gpus.length?[...instances.values()].find(i=>i.id!==id&&i.status!=='error'&&i.model!==args.model&&i.gpus.some(g=>instance.gpus.includes(g))):null;
@@ -658,32 +516,14 @@ function engineProof(instance,{model,cfg,since}){
   proc.on('error',error=>{instance.status='error';instance.error=error.message;emit();});proc.on('exit',code=>{if(instances.has(id)&&instance.status!=='unloading'){instance.status='error';instance.error=`Engine stopped${code===null?'':` (exit ${code})`}. Open diagnostics or reload.`;emit();}});emit();
   }
   /* A start Control stopped waiting for is watched for as long as the start asked for (the server ends the engine itself when its own wait runs out, a minute after this one), and Control is asked now and then whether the engine is still there. */
-  /* fnOS patch 0010: ready means provable from outside, not "the start call returned". */
-  const loadStartedAt=Date.now();const deadline=Date.now()+(adopted?Math.max(300,startWait??300)*1000:300000);let lastAsked=0;let proofMissing=['the engine never answered /health'];let healthBody=null;while(Date.now()<deadline&&job.state==='running'){
+  const deadline=Date.now()+(adopted?Math.max(300,startWait??300)*1000:300000);let lastAsked=0;while(Date.now()<deadline&&job.state==='running'){
    if(instance.status==='error')throw new Error(instance.error);
    if(adopted&&instance.profile&&Date.now()-lastAsked>10000){lastAsked=Date.now();const st=await control.status(instance.profile).catch(()=>null);if(st&&['failed','stopped','stale'].includes(st.state)){instance.status='error';instance.error=humanStartError({message:st.error||'server_exited',output:st});emit();throw new Error(instance.error);}}
-   try{const response=await fetcher(`http://127.0.0.1:${instance.port}/health`,{headers:{authorization:`Bearer ${key}`},signal:AbortSignal.timeout(2000)});if(job.state!=='running'){await unload(id);return;}
-    if(response.ok){
-     try{healthBody=await response.json();}catch{healthBody=null;}
-     if(healthBody&&healthBody.loaded===true){
-      const proof=engineProof(instance,{model:args.model,cfg,since:loadStartedAt});
-      if(proof.ok){instance.status='ready';instance.phase='idle';
-    /* Remember what this model needed on each card, for the next load's preflight (0006). */
-    if(freeBeforeLoad&&instance.gpus.length){const afterLoad=gpuMemory();if(afterLoad)for(const gpuIndex of instance.gpus){const before=freeBeforeLoad.get(gpuIndex),after=afterLoad.get(gpuIndex);if(before&&after&&before.free>after.free)recordVramNeed(args.model,[gpuIndex],before.free-after.free,cfg);}}await noteDrafting(job,instance,key);if(resources||args.vision!==undefined||args.contextChosen===true||JSON.stringify(cfg[USER_KEY]??null)!==JSON.stringify(config[USER_KEY]??null))writeModelConfig(record(args.model).path,{...config,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),...visionPreferences,...(args.contextChosen===true?{ui_context_chosen:true}:{}),...(cfg[USER_KEY]?{[USER_KEY]:cfg[USER_KEY]}:{})});emit();ensurePoll();instance.parallelNote=parallelNote;/* fnOS patch 0012: a load that only worked in the low-memory mode must stay visible in the log, so nobody takes a half-speed engine as a good one. */{const degraded=/low.memory|low memory|out of memory|from the SSD/i.test(`${job.summary??''} ${retried?.words??''} ${instance.notice??''}`);append(args.model,`[fnOS] load ok after ${Math.round((Date.now()-loadStartedAt)/1000)}s: ${args.model} on GPU ${instance.gpus.map(i=>i+1).join(', ')||'(none)'}, port ${instance.port}, ${degraded?'LOW-MEMORY mode (part of the model is read from the SSD, slower)':'full memory mode'}`);}return {summary:retried?`${instance.label} is ready, after a second try: ${retried.words}`:`${instance.label} is ready.${parallelNote?' '+parallelNote:''}${picturesNote?' '+picturesNote:''}`,instanceId:id};}
-      else{proofMissing=proof.missing;}
-     }else{proofMissing=['Strata Control answers /health, but it reports the model is not loaded (loaded=false)'];
-      if(healthBody&&healthBody.model)proofMissing.push(`it is still serving ${healthBody.model}`);
-      if(Date.now()-loadStartedAt>90000)break;}
-    }
-   }catch{}
+   try{const response=await fetcher(`http://127.0.0.1:${instance.port}/health`,{headers:{authorization:`Bearer ${key}`},signal:AbortSignal.timeout(2000)});if(job.state!=='running'){await unload(id);return;}if(response.ok){instance.status='ready';instance.phase='idle';await noteDrafting(job,instance,key);if(resources||args.vision!==undefined||args.contextChosen===true||JSON.stringify(cfg[USER_KEY]??null)!==JSON.stringify(config[USER_KEY]??null))writeModelConfig(record(args.model).path,{...config,...(resources?{...resources,ui_resource_profile:args.resourceProfile}:{}),...visionPreferences,...(args.contextChosen===true?{ui_context_chosen:true}:{}),...(cfg[USER_KEY]?{[USER_KEY]:cfg[USER_KEY]}:{})});emit();ensurePoll();instance.parallelNote=parallelNote;return {summary:retried?`${instance.label} is ready, after a second try: ${retried.words}`:`${instance.label} is ready.${parallelNote?' '+parallelNote:''}${picturesNote?' '+picturesNote:''}`,instanceId:id};}}catch{}
    await new Promise(resolve=>setTimeout(resolve,1200));
   }
   if(job.state!=='running'){await unload(id);return;}
-  if(instance.profile)await control.stop(instance.profile).catch(()=>{});else await stopProcess(proc);
-  instance.status='error';
-  instance.error=`The engine did not come up: ${proofMissing.join('; ')}. Nothing is reported ready, so the model is not usable yet. Check the engine log and free memory.`;
-  append(args.model,`[fnOS] load failed after ${Math.round((Date.now()-loadStartedAt)/1000)}s: ${proofMissing.join('; ')}`);
-  throw new Error(instance.error);
+  if(instance.profile)await control.stop(instance.profile).catch(()=>{});else await stopProcess(proc);instance.status='error';instance.error='Loading took more than five minutes. Check the engine log and free memory.';throw new Error(instance.error);
  }
  async function freePort(requested){for(let port=Number(requested??18500);port<=Number(requested??18500)+20;port++){if(!Number.isInteger(port)||port<1024||port>65535)throw new Error('Choose a port from 1024 to 65535.');if([...instances.values()].some(i=>i.port===port)){if(requested)throw new Error('This private engine port is already in use.');continue;}const available=await new Promise(resolve=>{const probe=createServer();probe.once('error',()=>resolve(false));probe.listen(port,'127.0.0.1',()=>probe.close(()=>resolve(true)));});if(available)return port;if(requested)throw new Error('This private engine port is already in use.');}throw new Error('No free private engine port was found.');}
  let pollCount=0;
@@ -827,7 +667,7 @@ function engineProof(instance,{model,cfg,since}){
   const room=args.resourceProfile==='work';
   return autotuner.start(job,job.kind==='recheck'?'recheck':'tune',{configPath:path,presetId:args.presetId,mode:args.mode,use:args.use,goal:room?'room':'speed',leaveRam:room?20:0,allowSmallDifferences:args.allowSmallDifferences===true,name:args.name},{onProgress:p=>{job.summary=p.text??job.summary;emit();}});
  }
- function operation(kind,args={}){if(!['install','load','pictures','benchmark','tune','autotune','recheck','calibrate','update-engine','update-strata','rollback','install-engine-file','remove','restart-models'].includes(kind))throw new Error('Choose a supported native operation.');if(kind==='restart-models'&&!packaged)throw new Error('Choose a supported native operation.');if(!snapshot.available&&!(packaged&&(COMPONENT_KINDS.includes(kind)||kind==='restart-models')))throw new Error(snapshot.error??'Connect the native Strata installation first.');if(kind==='load'&&(typeof args.model!=='string'||!args.model.trim()))throw new Error('Choose a model to load.');/* fnOS patch 0010: no model, no job. */if(kind==='install'||kind==='load'){const refusal=engineRefusal(snapshot.catalog,args.model,snapshot.engineInfo);if(refusal)throw new Error(refusal);}return begin(kind,job=>kind==='install'?install(job,args):kind==='load'?loadEngine(job,args):kind==='pictures'?picturesOnly(job,args):kind==='benchmark'?benchmark(job,args):kind==='tune'?tune(job,args):kind==='autotune'||kind==='recheck'?autotune(job,args):kind==='remove'?removeModel(job,args):kind==='restart-models'?restartStopped(job):program(job,args),{guided:args.guided===true,model:args.model,...(args.family?{family:args.family}:{})});}
+ function operation(kind,args={}){if(!['install','load','pictures','benchmark','tune','autotune','recheck','calibrate','update-engine','update-strata','rollback','install-engine-file','remove','restart-models'].includes(kind))throw new Error('Choose a supported native operation.');if(kind==='restart-models'&&!packaged)throw new Error('Choose a supported native operation.');if(!snapshot.available&&!(packaged&&(COMPONENT_KINDS.includes(kind)||kind==='restart-models')))throw new Error(snapshot.error??'Connect the native Strata installation first.');if(kind==='install'||kind==='load'){const refusal=engineRefusal(snapshot.catalog,args.model,snapshot.engineInfo);if(refusal)throw new Error(refusal);}return begin(kind,job=>kind==='install'?install(job,args):kind==='load'?loadEngine(job,args):kind==='pictures'?picturesOnly(job,args):kind==='benchmark'?benchmark(job,args):kind==='tune'?tune(job,args):kind==='autotune'||kind==='recheck'?autotune(job,args):kind==='remove'?removeModel(job,args):kind==='restart-models'?restartStopped(job):program(job,args),{guided:args.guided===true,model:args.model,...(args.family?{family:args.family}:{})});}
  /* ---- The models folder card (0.2.2): what a picked folder means, and the three choices. The copying is Control's (strata models move). ---- */
  const currentModelsFolder=()=>preferences.downloadDirectory??(modelsDirectory?modelsDirectory():snapshot.installed?.data_folder)??null;
  const moveFile=()=>join(directory,'models-move.cancel');

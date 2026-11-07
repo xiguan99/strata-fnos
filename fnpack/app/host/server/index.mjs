@@ -285,7 +285,7 @@ const backend = await detectBackend({ force: true });
 
 console.log(`strata host  ·  http://${HOST}:${PORT}`);
 console.log(`hardware     ·  ${boot.accelerator.label} / ${boot.accelerator.backend} / ${boot.cpu.cores} cores / ${Math.round(boot.memory.totalGb)} GB`);
-const printInference = engine => console.log(`inference    ·  ${models.REAL ? inferenceLine({ backend, engine, settled: bundledEngineSettled }) : (control ? 'native engine — models load through Strata Control (no demo backend in this build)' : 'simulated (design iteration) — set STRATA_REAL_ENGINE=1 for a real engine')}`);
+const printInference = engine => console.log(`inference    ·  ${models.REAL ? inferenceLine({ backend, engine, settled: bundledEngineSettled }) : 'simulated (design iteration) — set STRATA_REAL_ENGINE=1 for a real engine'}`);
 if (models.REAL && control && backend.kind === 'unavailable' && bundledEngineSettled) void control.engine().catch(() => null).then(printInference);
 else printInference(null);
 console.log(`models dir   ·  ${store.MODELS_DIR}`);
@@ -960,11 +960,9 @@ await cloudflare.inspect();
 
 /* --------------------------------------------------------------- routing --- */
 
-/* host controls 的来源判定：官方只放行 localhost / 127.0.0.1 / [::1]。fnOS 装机版没有桌面宿主外壳，
-   用户是浏览器直接开 http://<NAS 局域网 IP>:8791 —— 那种 Origin 会被判成"不是本机"，所有 /api 一律 403，
-   界面就冒出「打开本地 Strata 应用以使用主机控件」。
-   fnOS 补丁（对应 538dc27d）：放行回环、本机主机名与私有网段（10/8、172.16/12、192.168/16、169.254/16，
-   IPv6 的 ::1、fe80::/10、fc00::/7）。公网域名/公网 IP 仍然 403。 */
+/* fnOS 补丁 0004：官方只放行 localhost / 127.0.0.1 / [::1]。fnOS 装机版没有桌面外壳，
+   用户直接用浏览器开 http://<NAS 局域网 IP>:8791，那种 Origin 被判"不是本机"，所有 /api 一律 403。
+   放行回环、本机主机名（含 .local）与私有网段；公网域名/公网 IP 仍然 403。 */
 const localHostNames = (() => {
   const names = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
   const host = String(osHostname() ?? '').toLowerCase();
