@@ -1,6 +1,6 @@
 #!/bin/bash
-# strata 原版（pristine）构建脚本：只做 fnOS 打包，不含任何 fnOS 补丁
-# 树内容 = 官方 AppImage 解包（node/host/control/harness）+ 官方 engine bundle，原样打包
+# strata 原版 + 局域网放行（仅补丁 0004）构建脚本
+# 树内容 = 官方 AppImage 解包（node/host/control/harness）+ 官方 engine bundle，只改 host/server/index.mjs 的 Origin 判定
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,8 +13,14 @@ echo "═══ 构建 strata(原版+局域网放行) v$VERSION ═══"
 APP="$ROOT/fnpack/app"
 export PYTHONDONTWRITEBYTECODE=1
 
-# ── 0) 原版校验：树里不许出现我们补丁的任何痕迹 ──
-echo "[0/3] 原版校验（补丁痕迹必须为 0）..."
+# ── 0) 变体校验：只允许 0004（isLocalOrigin），其余补丁痕迹必须为 0 ──
+echo "[0/3] 变体校验（仅 0004）..."
+if ! grep -q "function isLocalOrigin" "$APP/host/server/index.mjs"; then
+  echo "✗ host/server/index.mjs 缺 0004（isLocalOrigin）——这不是局域网放行树"; exit 1
+fi
+if ! grep -q "isLocalOrigin(origin.hostname)" "$APP/host/server/index.mjs"; then
+  echo "✗ 403 判定没用 isLocalOrigin"; exit 1
+fi
 for pair in \
   "host/server/native-control.mjs:rolesToDevices" \
   "control/serve/server.py:def gpu_names_by_index" \
@@ -23,11 +29,10 @@ for pair in \
   "host/server/native-control.mjs:engineProof"; do
   f="${pair%%:*}"; pat="${pair#*:}"
   if grep -q "$pat" "$APP/$f" 2>/dev/null; then
-    echo "✗ $f 里出现补丁痕迹「$pat」——这不是原版树"; exit 1
+    echo "✗ $f 里出现其它补丁痕迹「$pat」——这个包只该带 0004"; exit 1
   fi
 done
-grep -q "isLocalOrigin" "$APP/host/server/index.mjs" || { echo "✗ 缺 0004 isLocalOrigin"; exit 1; }
-echo "  ✓ 仅含 0004（isLocalOrigin），其余补丁痕迹为 0"
+echo "  ✓ 只剩 0004"
 
 # ── 1) 图标 ──
 echo "[1/3] 生成图标 ..."

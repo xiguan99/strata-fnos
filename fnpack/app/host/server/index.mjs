@@ -960,9 +960,9 @@ await cloudflare.inspect();
 
 /* --------------------------------------------------------------- routing --- */
 
-/* fnOS 补丁 0004：官方只放行 localhost / 127.0.0.1 / [::1]。fnOS 装机版没有桌面外壳，
-   用户直接用浏览器开 http://<NAS 局域网 IP>:8791，那种 Origin 被判"不是本机"，所有 /api 一律 403。
-   放行回环、本机主机名（含 .local）与私有网段；公网域名/公网 IP 仍然 403。 */
+/* fnOS: the installed app has no desktop shell; the browser opens http://<LAN IP>:8791, so an Origin
+   from a private address must count as local. Loopback, this host's name and private ranges pass;
+   public names and addresses still get 403. */
 const localHostNames = (() => {
   const names = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
   const host = String(osHostname() ?? '').toLowerCase();
