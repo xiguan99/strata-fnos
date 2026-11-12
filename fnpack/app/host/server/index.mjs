@@ -960,9 +960,11 @@ await cloudflare.inspect();
 
 /* --------------------------------------------------------------- routing --- */
 
-/* fnOS: the installed app has no desktop shell; the browser opens http://<LAN IP>:8791, so an Origin
-   from a private address must count as local. Loopback, this host's name and private ranges pass;
-   public names and addresses still get 403. */
+/* host controls 的来源判定：官方只放行 localhost / 127.0.0.1 / [::1]。fnOS 装机版没有桌面宿主外壳，
+   用户是浏览器直接开 http://<NAS 局域网 IP>:8791 —— 那种 Origin 会被判成"不是本机"，所有 /api 一律 403，
+   界面就冒出「打开本地 Strata 应用以使用主机控件」。
+   fnOS 补丁（对应 538dc27d）：放行回环、本机主机名与私有网段（10/8、172.16/12、192.168/16、169.254/16，
+   IPv6 的 ::1、fe80::/10、fc00::/7）。公网域名/公网 IP 仍然 403。 */
 const localHostNames = (() => {
   const names = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
   const host = String(osHostname() ?? '').toLowerCase();
@@ -1118,7 +1120,7 @@ async function api(req, res, path, method, url) {
   if(nativeInstance&&method==='POST')return json(res,200,nativeInstance[2]==='unload'?await native.unload(nativeInstance[1]):native.setDefault(nativeInstance[1]));
   const nativeSettings=/^\/api\/native\/models\/([a-z0-9_.-]+)\/settings$/.exec(path);
   /* Expert mode shows what will actually run: the saved tuning's values come with the settings (null when none applies or unreadable). */
-  if(nativeSettings&&method==='GET'){const settings=native.settings(nativeSettings[1]);let tuned=null;try{const t=await native.tuneEffective({model:nativeSettings[1],resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined});tuned=t.applied?t:null;}catch{tuned=null;}return json(res,200,{...settings,tuned});}
+  if(nativeSettings&&method==='GET'){const settings=native.settings(nativeSettings[1]);let tuned=null;try{const t=await native.tuneEffective({model:nativeSettings[1],resourceProfile:url.searchParams.get('resourceProfile')||undefined,vision:url.searchParams.get('vision')||undefined});tuned=t.applied?t:null;}catch{tuned=null;}return json(res,200,{...settings,tuned,hints:await native.settingsHints?.(nativeSettings[1])});}
   if(nativeSettings&&method==='PATCH')return json(res,200,native.save(nativeSettings[1],await readBody(req)));
   const nativeSettingsFile=/^\/api\/native\/models\/([a-z0-9_.-]+)\/settings-file$/.exec(path);
   if(nativeSettingsFile&&method==='GET')return json(res,200,native.settingsFile(nativeSettingsFile[1]));
