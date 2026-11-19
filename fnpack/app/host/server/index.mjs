@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { engineProgressMark } from './agent/engine-progress.mjs';
+import { helperLimitMin } from './agent/children.mjs';
 import './system-ca.mjs';        // #3722: the operating system's certificates, before any HTTPS request
 import { createCloudflare } from './cloudflare.mjs';
 import { createConnectorInstaller } from './cloudflared-install.mjs';
@@ -17,7 +18,7 @@ import { materializeSkills, parseSkillFile, skillSlug, writeCreatedSkill } from 
 import { systemFonts } from './fonts.mjs';
 import { tuningDir } from './platform-paths.mjs';
 import { createAgentBridge, plainTurnFailure } from './agent/agent-bridge.mjs';
-import { mcpSkippedNotices } from './agent/profile.mjs';
+import { mcpSkippedNotices, setCompactionChoice, compactionNumber, thresholdRatio, headroomFraction, compactionThreshold, localOutputBudget, DEFAULT_THRESHOLD_RATIO, DEFAULT_HEADROOM_FRACTION } from './agent/profile.mjs';
 import { createAgentTools } from './agent/tools-settings.mjs';
 import { withPlainStatus } from './agent/status.mjs';
 import { findBrowser, findPlaywrightMcp } from './agent/browser-probe.mjs';
@@ -49,12 +50,11 @@ import * as store from './store.mjs';
 import { createChatStore, storeFailure } from './chat-store.mjs';
 import { makePrivateDir } from './private-file.mjs';
 import * as supervisor from './supervisor.mjs';
-import * as engineInstall from './engine-install.mjs';
 import { detectBackend, currentBackend, streamChat, inferenceLine } from './inference.mjs';
 import { CONTEXT_TOKENS, VARIANTS, localModels, variant } from './catalog.mjs';
 import { browseLocalModels, inspectLocalModel } from './local-models.mjs';
 import { keepStreamAlive } from './stream-beat.mjs';
-import { EventHub, badRequest, error, json, readBody, readRaw, requestUrl, sameSecret, uid } from './util.mjs';
+import { EventHub, InvalidJsonError, badRequest, error, json, readBody, readRaw, requestUrl, sameSecret, uid } from './util.mjs';
 import { createUploads } from './chat-uploads.mjs';
 import { createNativeDrops } from './native-drop.mjs';
 import { createVisionProbe, effectiveVision, readsPicturesByDefault } from './vision-probe.mjs';
@@ -64,6 +64,7 @@ import { createModelProviders } from './model-providers.mjs';
 import { createForkTimeskip } from './timeskip-fork.mjs';
 import { prepareOversized } from './oversize.mjs';
 import { createChatFolders, chatRootOf, openFile, resolveChatFile, previewFile, rawFile, createAttachments, withAttachments } from './chat-files.mjs';
+import { createUserRules, rulesFile } from './user-rules.mjs';
 import { createLlmProxy, samplingFromExpert } from './agent/llm-shape.mjs';
 import { checkUpdates, checkComponentUpdates, engineFirstRun } from './updates.mjs';
 import { plainNoModel } from './no-model-text.mjs';
@@ -81,11 +82,12 @@ import { listEngines, changeEngine } from './engine-library.mjs';
 import { forbidden as acquisitionForbidden } from './acquisition.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { nativeGateway } from './native-gateway.mjs';
+import { nativeModelEntries } from './native-models.mjs';
 import { proxyCompletion } from './inference.mjs';
 import { apiPath } from './api-paths.mjs';
 import { findFreePort, listenProblem } from './ports.mjs';
 import { validateChatImages } from './chat-images.mjs';
-import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf } from './timeskip.mjs';
+import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf, forgetTrial } from './timeskip.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -127,7 +129,7 @@ const modelProviders = createModelProviders({ directory: store.DATA_DIR, knownTh
 const imageModels = createImageModels({ dataDir: store.DATA_DIR, modelsDir: () => store.MODELS_DIR, real: models.REAL, changed: value => hub.send('image-models', value) });
 /* The installed app ships Strata Control (python + strata_control) next to the host; a source checkout has none and keeps its older paths. */
 const CONTROL = findControl();
-const control = createControl({ control: CONTROL });
+const control = createControl({ control: CONTROL, log: line => console.log(line) });
 // Files a run as administrator made in Strata's own folders (owner Administrators) are given back to the user at every start; best effort, never blocks.
 if (control && process.platform === 'win32' && !process.env.STRATA_NO_REPAIR_ACCESS) void control.repairAccess().catch(() => {});
 /* Which window shows the page (the app window or, when that cannot run, a browser tab) and what only the app window can do: app-ui.mjs. */
@@ -172,7 +174,7 @@ const native=createNativeControl({control,ready:bundledEngine,appUpdater,hardwar
    pinned component (STRATA_HARNESS_DIR), not part of this host, so its absence is a visible capability
    state and the chat falls back to the direct path with a notice, never silently to another model. */
 // What the person chose in Settings -> Tools (tool groups, web search service and key, the browser, their own tools).
-const llmProxy = createLlmProxy({ targetOf: key => agent.llmTarget(key), samplingNow: () => samplingFromExpert(store.get().expert) });
+const llmProxy = createLlmProxy({ targetOf: key => agent.llmTarget(key), samplingNow: () => samplingFromExpert(store.get().expert), onMarker: marker => agent.noteToolMarker(marker) });
 const agentTools = createAgentTools({ read: () => store.get().agentTools, write: value => store.update({ agentTools: value }), dataDir: store.DATA_DIR, browser: () => ({ ...findBrowser(), cli: findPlaywrightMcp(agent.harnessDir()) }) });
 agentTools.ensureFile();
 const visionProbe = createVisionProbe();
@@ -205,8 +207,11 @@ const agent = createAgentBridge({
   expertSampling: () => samplingFromExpert(store.get().expert),
   // How far a local engine has got (the 2 s /metrics poll), for the agent's stall watchdog: it moves while a long prompt is read.
   engineProgress: instanceId => engineProgressMark(native.readyInstances().find(i => i.id === instanceId)),
+  // #5996: the person's helper time limit (Settings), read when the watchdog looks, so a change applies to helpers already running.
+  helperLimitMs: () => (helperLimitMin(store.get().agentChat?.helperLimitMin) ?? 0) * 60_000,
   onPlan: (chatId, event, plan) => hub.send('plan', { chatId, event, plan }),
   onQueue: (chatId, queue) => hub.send('queue', { chatId, queue }),
+  onWake: (chatId, requestId) => hub.send('chat-wake', { chatId, requestId }),
   dataDir: store.DATA_DIR,
   componentsDir: componentsDirectory(),
   // The installer ships the Harness next to the host (<install>/host/server -> <install>/harness).
@@ -219,10 +224,38 @@ const agent = createAgentBridge({
     slots: i.metrics?.live?.slots?.length || i.parallel || 1,
     // The tool servers set up for this model (Settings, Tools): the agent connects to the same ones.
     mcpServers: i.mcpServers,
+    // its "Tool timeout (seconds)": the agent waits as long for those servers as the engine does (#5788)
+    mcpTimeoutS: i.mcpTimeoutS ?? null,
   })),
   connections: () => modelProviders.withSecrets().map(c => ({ ...c, models: c.models.map(m => ({ ...m, vision: readsPicturesByDefault(m, visionProbe.known(c, m.id)), reasoning: m.reasoning ?? visionProbe.knownThinks(c, m.id) ?? null })) })),
   log: line => console.log(line),
 });
+// The person's choice of when the assistant summarises an old part of a chat, before the first profile is written.
+setCompactionChoice(store.get().agentChat);
+/** Where compaction starts on the model the chat would use now, for the Settings line that says it in tokens. */
+function compactionModelLine() {
+  const list = native.readyInstances();
+  const inst = list.find(i => i.id === native.defaultInstanceId()) ?? list[0] ?? null;
+  const context = inst?.metrics?.engine?.max_context ?? inst?.context ?? 0;
+  if (!inst || !(context > 0)) return null;
+  const thresholdTokens = compactionThreshold(context, localOutputBudget(context));
+  return { name: inst.label || inst.apiModelId, context, thresholdTokens, percent: Math.round((thresholdTokens / context) * 100) };
+}
+/** What Settings -> Chat shows about the summarising point: the saved choice, what answers now, and where it came from. */
+function compactionView() {
+  const saved = store.get().agentChat ?? {};
+  const fromEnv = name => { const v = Number.parseFloat(process.env[name]); return Number.isFinite(v) ? v : null; };
+  const validRatio = v => compactionNumber(v, 0.1, 0.99) !== null;
+  const validFraction = v => compactionNumber(v, 0, 0.5) !== null;
+  const sourceOf = (savedValue, envName, valid) => (valid(savedValue) ? 'setting' : (valid(fromEnv(envName)) ? 'environment' : 'default'));
+  return {
+    choice: { thresholdRatio: validRatio(saved.thresholdRatio) ? saved.thresholdRatio : null, headroomFraction: validFraction(saved.headroomFraction) ? saved.headroomFraction : null },
+    effective: { thresholdRatio: thresholdRatio(), headroomFraction: headroomFraction() },
+    defaults: { thresholdRatio: DEFAULT_THRESHOLD_RATIO, headroomFraction: DEFAULT_HEADROOM_FRACTION },
+    source: { thresholdRatio: sourceOf(saved.thresholdRatio, 'STRATA_COMPACTION_THRESHOLD_RATIO', validRatio), headroomFraction: sourceOf(saved.headroomFraction, 'STRATA_COMPACTION_HEADROOM_FRACTION', validFraction) },
+    model: compactionModelLine(),
+  };
+}
 let storageChanging = false;
 let modelOperations = 0;
 const requestQueue = new RequestQueue(n => monitor.queueWaiting(n));
@@ -243,7 +276,6 @@ hub.send = (event, payload) => {
 const boot = await hardware.detect({ force: true });
 models.init(hub);
 engine.init(hub);
-engineInstall.init(hub);
 monitor.init(hub, boot);
 monitor.setLiveProbe(() => native.hasLive());
 serving.init(hub, { port: PORT, host: HOST });
@@ -257,30 +289,8 @@ function runtimeState(){
   return runtimeModels.state();
 }
 
-const startupModelId = process.env.STRATA_REAL_ENGINE === '1' ? (store.get().loaded ?? store.get().current) : null;
-if (startupModelId) {
-  monitor.setModel(startupModelId);
-  const lastId = startupModelId;
-  setTimeout(() => {
-    const v = variant(lastId);
-    if (!v || !models.isOnDisk(lastId)) return;
-    console.log(`autostart    ·  loading ${v.label}`);
-    void models
-      .load(lastId, {
-        hardware: boot,
-        config: { beginner: store.get().beginner, expert: engine.params(), serving: store.get().serving },
-        onPhase: async (phase, id) => {
-          if (phase === 'loading') await monitor.beginLoading(id);
-          if (phase === 'ready') {
-            await monitor.setModel(id);
-            engine.markRunning(boot.accelerator.backend);
-            hub.send('engine', await engine.config());
-          }
-        },
-      })
-      .catch((err) => console.error('autostart failed:', err.message));
-  }, 700);
-}
+/* No start-up load: the remembered model of the real-engine mode was loaded through a llama.cpp llama-server (0.2.14, also for an imported
+   GGUF nobody had loaded). Models run on the Strata engine, whose own start does not come through here. */
 const backend = await detectBackend({ force: true });
 
 console.log(`strata host  ·  http://${HOST}:${PORT}`);
@@ -517,6 +527,8 @@ const nativeDrops = createNativeDrops();
 const uploads = createUploads({ dir: join(store.DATA_DIR, 'uploads'), folderOf: chatId => chatRoot(chatId), attachments: chatAttachments });
 try { uploads.sweep(); } catch { /* best effort */ }
 const chatFolders = createChatFolders({ file: join(store.DATA_DIR, 'chat-folders.json') });
+/* The person's own rules for every answer (#5084): the AGENTS.md the Harness reads in agent mode, added to the plain chat paths' prompt too. */
+const userRules = createUserRules({ file: rulesFile(store.DATA_DIR) });
 /** Where a chat's files are: its chosen folder, else the folder its agent worked in, else the default workspace (chat-files.mjs). One source for every file route. */
 const chatRoot = chatId => chatRootOf({ chosen: chatFolders.get(chatId), used: agent.workingFolder?.(chatId), fallback: workspaces[0]?.path ?? WORKSPACE });
 
@@ -590,7 +602,7 @@ async function runRemoteTurn({ selection, message, history, images = [], thinkin
     const appliedSkills = selectSkills(skillState, message, workspaceId);
     entry = serving.open({ client: 'Strata chat', endpoint: connection.protocol === 'anthropic' ? '/messages' : connection.protocol === 'openai-responses' ? '/responses' : '/chat/completions', model: `${connection.name} · ${model.name}`, cancel: () => controller.abort(new DOMException('Cancelled by the user', 'AbortError')) });
     serving.mark(entry.id, { state: 'generating' });
-    const result = await modelProviders.stream({ selection, message, history, images, thinking, signal: requestSignal, systemPrompt: ['You are Strata, a helpful assistant. Answer clearly. Do not claim to have read files or performed actions unless their results are included in the conversation.', skillInstructions(appliedSkills)].filter(Boolean).join('\n\n'), onFrame: frame => {
+    const result = await modelProviders.stream({ selection, message, history, images, thinking, signal: requestSignal, systemPrompt: ['You are Strata, a helpful assistant. Answer clearly. Do not claim to have read files or performed actions unless their results are included in the conversation.', userRules.promptBlock(), skillInstructions(appliedSkills)].filter(Boolean).join('\n\n'), onFrame: frame => {
       if (frame.type === 'start') noteSkillUse(appliedSkills);
       if (frame.type === 'done') serving.mark(entry.id, { tokensIn: frame.tokensIn, tokensOut: frame.tokensOut, usageSource: frame.usageSource });
       onFrame({ ...frame, requestId: entry.id, model: model.name, contextMax: model.contextMax, remoteModel: true, ...(frame.type === 'start' ? { skills: appliedSkills.map(s => s.name) } : {}) });
@@ -657,7 +669,7 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
   if(native.hasLive()||nativeModelId){
     let instance;try{instance=native.resolveInstance(nativeModelId??native.state().defaultId);}catch(e){const message=plainNoModel(e.message);onFrame({type:'error',message});return {error:message};}const started=Date.now(),cancel=new AbortController();
     const entry=serving.open({client:client??'Strata chat',endpoint:'/chat/completions',model:instance.apiModelId,instanceId:instance.id,gpuIds:instance.gpus.map(String),cancel:()=>cancel.abort()});
-    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
+    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,userRules.promptBlock(),skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
   }
   runtimeState();
   let instance;
@@ -687,7 +699,7 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
       // Scope is resolved again at dispatch: a disabled skill never stays active
       // merely because the request waited in the queue.
       const appliedSkills = selectSkills(skillState, message, workspaceId);
-      const systemPrompt = [SYSTEM_PROMPT, skillInstructions(appliedSkills)].filter(Boolean).join('\n\n');
+      const systemPrompt = [SYSTEM_PROMPT, userRules.promptBlock(), skillInstructions(appliedSkills)].filter(Boolean).join('\n\n');
       serving.mark(entry.id, { state: 'generating' });
       const contextMax = instance.memory.context;
       const modelMonitor=models.REAL?monitor:{
@@ -766,8 +778,8 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
   }
 }
 
-// `HERE` is apps/host/server, so the repository root is three levels up (server -> host -> apps).
-const REPO_ROOT = CONTROL ? CONTROL.dir : resolve(HERE, '..', '..', '..');
+// `HERE` is app/host/server, so the repository root is three levels up (server -> host -> app); the Terminal's sources are in its terminal/.
+const REPO_ROOT = CONTROL ? CONTROL.dir : resolve(HERE, '..', '..', '..', 'terminal');
 // The interpreter that drives the job is the same one the launcher would pick, named explicitly so
 // a packaged run uses the runtime the bundle carries rather than whatever `python3` resolves to.
 const PYTHON = resolvePython({ repo: REPO_ROOT, control: CONTROL });
@@ -786,6 +798,10 @@ const TIMESKIP_REVISE = process.env.STRATA_TIMESKIP_REVISE
 const INTERNAL_SECRET = randomBytes(24).toString('hex');
 /** The model a trial runs on, by run id: the chat's saved API model when it uses one, else the loaded local model. */
 const timeskipChoices = new Map();
+/** How many of those to keep: a finished run never asks for its model again, and only the newest trials can still be
+ * revised. The same bound the request board and the Time-skip listing use (serving.mjs `MAX_REQUESTS`, timeskip.mjs
+ * `MAX_LISTED`). */
+const TIMESKIP_CHOICE_CAP = 60;
 /** Trials this host is driving: run id -> { chatId (the chat that asked), turnChat (the assistant's own chat id), controller, step (the assistant's current status), lastSent }. */
 const trials = new Map();
 const trialByChat = new Map();
@@ -800,17 +816,27 @@ function trialActivity(run) {
     default: return null;
   }
 }
+/** Forget a trial this host drives: its poll, its entry, the chat's pointer to it, and the model it ran on (a trial
+ * whose record on disk is gone can never ask for that model again). Every way out of `watchTrial` and `stopTrial`
+ * goes through here, so dropping one of the four can no longer leave the other three behind. */
+function dropTrial(id, timer) {
+  if (timer) clearInterval(timer);
+  forgetTrial({ trials, trialByChat, choices: timeskipChoices }, id);
+}
 /** Tell the page when the job's phase or the assistant's step changed (SSE `timeskip`), at most every 2 s. */
 function watchTrial(id) {
   const trial = trials.get(id);
   if (!trial) return;
   const timer = setInterval(() => {
     const run = timeskip.status(id);
-    if (!run) { clearInterval(timer); return; }
+    // The run's record is gone (its folder was deleted, or another program removed it): the trial is over, so it
+    // goes with everything keyed on its id - clearing only the timer left the entry, the chat's pointer and the
+    // model choice held until the host restarted.
+    if (!run) { dropTrial(id, timer); return; }
     const activity = trialActivity(run);
     const key = JSON.stringify([run.phase, activity]);
     if (key !== trial.lastSent) { trial.lastSent = key; hub.send('timeskip', { id, phase: run.phase, activity }); }
-    if (['completed', 'cancelled', 'failed', 'interrupted'].includes(run.phase)) { clearInterval(timer); trials.delete(id); if (trial.chatId) trialByChat.delete(trial.chatId); }
+    if (['completed', 'cancelled', 'failed', 'interrupted'].includes(run.phase)) dropTrial(id, timer);
   }, 2000);
   timer.unref?.();
   trial.timer = timer;
@@ -820,7 +846,7 @@ async function stopTrial(id) {
   const trial = trials.get(id);
   if (trial) { trial.controller?.abort(); if (trial.turnChat) void agent.stop(trial.turnChat).catch(() => {}); }
   const stopped = await timeskip.stop(id);
-  if (trial) { clearInterval(trial.timer); trials.delete(id); if (trial.chatId) trialByChat.delete(trial.chatId); }
+  dropTrial(id, trial?.timer);
   if (stopped) hub.send('timeskip', { id, phase: 'cancelled', activity: null });
   return stopped;
 }
@@ -951,9 +977,9 @@ taskTimer.unref();
 // The probe listens on the loopback address only: a probe on 0.0.0.0 made Windows Defender Firewall ask "Allow Node.js to communicate on these networks?" on the
 // first start of every new install path (QA 0213). Reserved or taken ports are caught on any address; the share listener itself binds 0.0.0.0 only when the person turns sharing on.
 const sharePort = await findFreePort(Number(process.env.STRATA_SHARE_PORT ?? PORT + 1), '127.0.0.1', { skip: [PORT] });
-const localShare = createLocalShare({ handle: openai, hasKey: () => !!store.get().serving?.apiKey, port: sharePort, changed: () => serving.setSharing(localShare.state()) });
+const localShare = createLocalShare({ handle: (req, res, path, method) => openai(req, res, path, method, 'share'), hasKey: () => !!store.get().serving?.apiKey, port: sharePort, allowResponses: true, changed: () => serving.setSharing(localShare.state()) });
 const tunnelPort = await findFreePort(Number(process.env.STRATA_TUNNEL_PORT ?? PORT + 2), '127.0.0.1', { skip: [PORT, sharePort] });
-const tunnelOrigin = createLocalShare({ handle: openai, hasKey: () => !!store.get().serving?.apiKey, host: '127.0.0.1', port: tunnelPort });
+const tunnelOrigin = createLocalShare({ handle: (req, res, path, method) => openai(req, res, path, method, 'tunnel'), hasKey: () => !!store.get().serving?.apiKey, host: '127.0.0.1', port: tunnelPort });
 const connector = createConnectorInstaller({ directory: join(store.HOME, 'engine', 'cloudflare'), componentDirectory: join(componentsDirectory(), 'cloudflared') });
 const cloudflare = createCloudflare({ origin: tunnelOrigin, originUrl: `http://127.0.0.1:${tunnelPort}`, hasKey: () => !!store.get().serving?.apiKey, changed: serving.setTunnel, locate: connector.locate, prepareConnector: connector.ensure, connectorInfo: connector.connector, findRunning: findRunningConnector });
 await cloudflare.inspect();
@@ -1010,7 +1036,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (path.startsWith('/v1/')) {
       if (storageChanging && method !== 'GET') return error(res, 409, 'Wait for the model folder check to finish.');
-      return await openai(req, res, apiPath(path), method);
+      return await openai(req, res, apiPath(path), method, 'app');
     }
     return await staticFile(req, res, path);
   } catch (err) {
@@ -1146,7 +1172,8 @@ async function api(req, res, path, method, url) {
 
   if(path === '/api/artifacts/open' && method === 'POST') {
     const body=await readBody(req, 30*1024*1024);
-    return json(res,200,await openArtifact(body,{examplesDir:join(ROOT,'public','examples'),previewsDir:join(store.HOME,'previews')}));
+    try { return json(res,200,await openArtifact(body,{examplesDir:join(ROOT,'public','examples'),previewsDir:join(store.HOME,'previews')})); }
+    catch (e) { if (e?.status === 400) return error(res, 400, e.message); throw e; }
   }
 
   // Host-owned recurring prompts. Creating a draft never enables a schedule.
@@ -1171,11 +1198,10 @@ async function api(req, res, path, method, url) {
     // The plan is only meaningful for a real engine binary, so the panel asks rather than guessing.
     // `available` is false when nothing is installed, which is a state the panel must show honestly
     // instead of offering a plan that cannot be computed.
-    const binary = supervisor.findBinary();
     const status = supervisor.status();
     return json(res, 200, {
-      available: Boolean(binary?.path),
-      path: binary?.path ?? null,
+      available: false,   // the host starts no engine binary of its own (no llama-server)
+      path: null,
       backend: status?.backend ?? null,
       running: Boolean(status?.running),
     });
@@ -1243,7 +1269,12 @@ async function api(req, res, path, method, url) {
     trials.set(result.run.id, { chatId, turnChat: null, controller: null, step: null, lastSent: '' });
     if (chatId) trialByChat.set(chatId, result.run.id);
     watchTrial(result.run.id);
-    if (body.remoteModel?.connectionId && body.remoteModel?.modelId) timeskipChoices.set(result.run.id, { connectionId: String(body.remoteModel.connectionId), modelId: String(body.remoteModel.modelId) });
+    if (body.remoteModel?.connectionId && body.remoteModel?.modelId) {
+      timeskipChoices.set(result.run.id, { connectionId: String(body.remoteModel.connectionId), modelId: String(body.remoteModel.modelId) });
+      // The revision step reads this while the job works. Without a bound the map kept one entry for every trial this
+      // app ever started - never read again, never dropped. A Map iterates in insertion order, so the oldest goes first.
+      if (timeskipChoices.size > TIMESKIP_CHOICE_CAP) timeskipChoices.delete(timeskipChoices.keys().next().value);
+    }
     return json(res, 200, { run: { ...result.run, activity: trialActivity(result.run) }, simulated: false });
   }
   if (path === '/api/timeskip/files' && method === 'GET') {
@@ -1368,7 +1399,7 @@ async function api(req, res, path, method, url) {
     if (engine && !engine.usable && !bundledEngineSettled) engine.notice = 'The engine that came with the app is being set up. This takes a minute the first time.';
     return json(res, 200, {
       packaged: process.env.STRATA_PACKAGED === '1',
-      control: CONTROL ? { dir: CONTROL.dir, python: CONTROL.python, version: control.version, bundle: CONTROL.bundle } : null,
+      control: control ? { dir: control.control.dir, python: control.control.python, version: control.version, bundle: control.control.bundle } : null,   // control.control: the Control in use now (a first-run update can switch it)
       engine,
       engineSetup: !bundledEngineSettled,
       componentsDir: componentsDirectory(),
@@ -1584,22 +1615,8 @@ async function api(req, res, path, method, url) {
         await monitor.setModel(id);engine.markRunning(hw.accelerator.backend);hub.send('engine',await engine.config());
         return json(res,200,runtimeModels.libraryState(models.library()));
       }
-      if(!supervisor.findBinary())return error(res,409,'Install a compatible llama-server engine before switching from native Strata.');const candidate=models.library().variants.find(v=>v.id===id);if(!candidate||!['installed','loaded'].includes(candidate.state))return error(res,409,'Download this model before loading it.');for(const instance of native.state().instances)await native.unload(instance.id);
-      const lib = await models.load(id, {
-        hardware: hw,
-        config: { beginner: store.get().beginner, expert: engine.params(), serving: store.get().serving },
-        onPhase: async (phase, variantId) => {
-          if (phase === 'loading') await monitor.beginLoading(variantId);
-          if (phase === 'ready') {
-            await monitor.setModel(variantId);
-            monitor.idle('Model loaded — waiting for a request');
-            monitor.setContextMax(CONTEXT_TOKENS[store.get().beginner.contextLength] ?? 32768);
-            engine.markRunning(hw.accelerator.backend);
-            hub.send('engine', await engine.config());
-          }
-        },
-      });
-      return json(res, 200, runtimeModels.libraryState(lib));
+      // Strata's own engine only: 0.2.14 started a llama.cpp llama-server here (an imported GGUF, the starter list) in the real-engine mode
+      return error(res,409,'Strata runs models only on its own engine, so this model can\'t load here. Open Models and choose a model there, or use "Use a local GGUF…" for a file you already have.');
     }
   }
 
@@ -1649,15 +1666,6 @@ async function api(req, res, path, method, url) {
     hub.send('engine', await engine.config());
     hub.send('models', models.library());
     return json(res, 200, status);
-  }
-  if (path === '/api/engine/binary' && method === 'GET') return json(res, 200, engineInstall.status());
-  if (path === '/api/engine/binary' && method === 'POST') {
-    try {
-      const result = await engineInstall.install({ force: url.searchParams.get('force') === '1' });
-      return json(res, 200, result);
-    } catch (err) {
-      return error(res, err.status ?? 500, err.message, { ...engineInstall.status(), error: err.message });
-    }
   }
   if (path === '/api/engine/export' && method === 'GET') return json(res, 200, await engine.exportConfig());
 
@@ -1808,6 +1816,13 @@ async function api(req, res, path, method, url) {
       return json(res, 200, { path: rel, binary: true, sizeKb: st.size / 1024, text: '' });
     }
     return json(res, 200, { path: rel, text, sizeKb: st.size / 1024, updatedAt: st.mtime.toISOString() });
+  }
+
+  // The person's own rules for every answer (#5084). A save names the revision it read; another window's newer save is never overwritten.
+  if (path === '/api/rules' && method === 'GET') return json(res, 200, userRules.read());
+  if (path === '/api/rules' && method === 'PUT') {
+    const body = await readBody(req);
+    try { return json(res, 200, userRules.write(body.text, body.revision)); } catch (e) { return error(res, e.status ?? 400, e.message, e.code ? { code: e.code } : {}); }
   }
 
   // The folder a chat works in, and opening its files by path (notes-split-agent8.md).
@@ -1968,6 +1983,40 @@ async function api(req, res, path, method, url) {
 
   // --- agent --------------------------------------------------------------
   if (path === '/api/agent/status' && method === 'GET') return json(res, 200, agent.status());
+  // A chat the person deleted in the app: drop its Harness session and the host's entry for it, so the two registries
+  // do not grow with every chat of every day (the app's memory climbed until the WebView2 renderer OOMed).
+  if (path === '/api/agent/chat/forget' && method === 'POST') {
+    const body = await readBody(req);
+    if (typeof body.chatId !== 'string' || !body.chatId) return error(res, 400, 'chatId is required');
+    agent.forget(body.chatId);
+    return json(res, 200, { ok: true });
+  }
+  // When the assistant summarises an old part of a chat (Settings -> Chat). null puts a name back to automatic;
+  // the running assistant picks the new number up on its next message (it is part of the profile's signature).
+  if (path === '/api/agent/compaction' && method === 'GET') return json(res, 200, compactionView());
+  if (path === '/api/agent/helper-limit' && method === 'GET') return json(res, 200, { helperLimitMin: helperLimitMin(store.get().agentChat?.helperLimitMin) });
+  if (path === '/api/agent/helper-limit' && method === 'POST') {
+    const body = await readBody(req);
+    const value = body?.helperLimitMin ?? null;
+    if (value !== null && helperLimitMin(value) === null) return error(res, 400, 'helperLimitMin is 30, 60 or 120 (minutes), or null for Off.');
+    store.update({ agentChat: { ...(store.get().agentChat ?? {}), helperLimitMin: helperLimitMin(value) } });
+    return json(res, 200, { helperLimitMin: helperLimitMin(value) });
+  }
+  if (path === '/api/agent/compaction' && method === 'POST') {
+    const body = await readBody(req);
+    const saved = store.get().agentChat ?? {};
+    const next = { ...saved };
+    for (const [name, min, max] of [['thresholdRatio', 0.1, 0.99], ['headroomFraction', 0, 0.5]]) {
+      if (!Object.hasOwn(body, name)) continue;
+      if (body[name] === null) { next[name] = null; continue; }
+      const value = compactionNumber(body[name], min, max);
+      if (value === null) return error(res, 400, `${name} is a fraction between ${min} and ${max}, or null for automatic.`);
+      next[name] = value;
+    }
+    store.update({ agentChat: next });
+    setCompactionChoice(next);
+    return json(res, 200, compactionView());
+  }
   // The assistant's model requests, with the person's Response settings added (llm-shape.mjs). This computer only.
   const llmRoute = /^\/api\/internal\/agent-llm\/([A-Za-z0-9_.~-]+)(\/.*)$/.exec(path);
   if (llmRoute) { llmProxy(req, res, llmRoute[1], llmRoute[2] + (url.search ?? '')); return undefined; }
@@ -2062,7 +2111,7 @@ async function api(req, res, path, method, url) {
   /* A page that has just loaded asks which chats have a turn running (a reload does not stop a turn), and takes one over again: the catch-up
      of what was said while no page was there, then the live frames, as on /api/chat/stream. A turn that ended while the page was away
      (the page names it by requestId) is sent once, whole. 404 when there is nothing to take over. */
-  if (path === '/api/chat/active' && method === 'GET') return json(res, 200, { turns: agent.runningTurns() });
+  if (path === '/api/chat/active' && method === 'GET') return json(res, 200, { turns: agent.runningTurns(), woken: agent.wokenTurns() });
   if (path === '/api/chat/attach' && method === 'POST') {
     const b = await readBody(req);
     if (typeof b.sessionId !== 'string' || !b.sessionId) return error(res, 400, 'sessionId is required');
@@ -2161,11 +2210,29 @@ async function api(req, res, path, method, url) {
 
 /* -------------------------------------------------- OpenAI-compatible API --- */
 
-async function openai(req, res, path, method) {
+/** The /v1 refusal of a page of another site while no API key is set (wording approved by the coordinator 11-16). */
+const V1_FOREIGN_PAGE = 'Other websites can\'t use this API while no API key is set. Set an API key in Serving to allow it.';
+/** `via`: the listener the request came in on: 'app' (this app's own port), 'share' (LAN sharing) or 'tunnel' (#5661: MCP tools only on 'app'). */
+async function openai(req, res, path, method, via) {
   if (!serving.authorized(req)) return error(res, 401, 'Invalid API key');
+  // Without an API key, a web page of another site may not use the model (serving.mjs v1OriginRefused; strata serve has the same rule).
+  if (serving.v1OriginRefused(req, via)) return error(res, 403, V1_FOREIGN_PAGE);
+  try {
+    return await routeInference(req, res, path, method, via);
+  } catch (err) {
+    if (!(err instanceof InvalidJsonError)) throw err;
+    if (res.headersSent) return res.end();
+    const message = 'Invalid JSON in request body';
+    const detail = { type: 'invalid_request_error', message };
+    if (path === '/v1/messages') return json(res, 400, { type: 'error', error: detail });
+    return json(res, 400, { error: { ...detail, param: null, code: 'invalid_json' } });
+  }
+}
+
+async function routeInference(req, res, path, method, via) {
   if(native.state().instances.length){
-    if(path==='/v1/models'&&method==='GET')return json(res,200,{object:'list',data:native.state().instances.filter(i=>i.status==='ready').map(i=>({id:i.apiModelId,object:'model',owned_by:'strata',meta:{instanceId:i.id,gpus:i.gpus,label:i.label,aliases:i.aliases}}))});
-    if(method==='POST'&&['/v1/chat/completions','/v1/messages','/v1/responses'].includes(path)){if(store.get().serving?.pauseServing)return error(res,503,'New API requests are paused.');if(path==='/v1/responses'&&!native.state().capabilities.responses)return error(res,501,'Update the native Strata installation to use the Responses API.');return nativeGateway({req,res,path,body:await readBody(req,12*1024*1024),control:native,serving});}
+    if(path==='/v1/models'&&method==='GET')return json(res,200,{object:'list',data:nativeModelEntries(native.state().instances)});
+    if(method==='POST'&&['/v1/chat/completions','/v1/messages','/v1/responses'].includes(path)){if(store.get().serving?.pauseServing)return error(res,503,'New API requests are paused.');if(path==='/v1/responses'&&!native.state().capabilities.responses)return error(res,501,'Update the native Strata installation to use the Responses API.');return nativeGateway({req,res,path,body:await readBody(req,12*1024*1024),control:native,serving,mcpAllowed:model=>serving.mcpToolsAllowed(req,via,model)});}
   }
   if(path==='/v1/responses'&&method==='POST')return error(res,503,'Load a native Strata model to use the Responses API.');
 
@@ -2379,6 +2446,9 @@ server.listen(PORT, HOST, () => {
   if (process.send) process.send({ type: 'strata-ready', port: PORT });
   // Engines a lost owner left behind (an earlier crash, an older version): ended after a PID + start time + command-line check.
   if (control && process.env.STRATA_PACKAGED === '1') control.cleanup().catch(() => {});
+  // A9: the first read of this PC (the graphics cards, the engine, the models: a few seconds) starts now, while the window is still opening,
+  // instead of when the first page asks. The first-run "Your model" step then often finds the list ready. It reads only; nothing is downloaded.
+  if (control && process.env.STRATA_PACKAGED === '1') Promise.resolve(native.refresh(false)).catch(() => { /* the page's own read tells the person */ });
 });
 
 let stopping=false;

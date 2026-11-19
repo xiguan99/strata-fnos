@@ -172,18 +172,59 @@ export function runCli(control, args, { env = process.env, timeoutMs = 60_000, s
   });
 }
 
-const failure = (result, fallback) => new ControlError(
-  result.json?.error?.message ?? result.json?.error ?? result.json?.notice ?? (result.stderr.split(/\r?\n/).filter(Boolean).pop() || fallback),
-  { exitCode: result.code, output: result.json });
+/** Control's exit 7 means two things: an engine is serving, or another update holds the update lock (strata_control/updater.py update_lock). The lock is told by its text. */
+export const UPDATE_LOCK_HELD = /another update is already running/i;
+const failure = (result, fallback) => {
+  const message = result.json?.error?.message ?? result.json?.error ?? result.json?.notice ?? (result.stderr.split(/\r?\n/).filter(Boolean).pop() || fallback);
+  return new ControlError(message, { exitCode: result.code, output: result.json, ...(UPDATE_LOCK_HELD.test(String(message)) ? { code: 'update_busy' } : {}) });
+};
 
-/** Operations the app uses. `run` is injectable so the host's tests need no Python. */
-export function createControl({ control = findControl(), env = process.env, run = null } = {}) {
+/**
+ * What a call to Control is called in the host log: its first two words and, when there is one, the profile it is about (`runtime stop (profile web-1)`).
+ * Nothing else of the command line is written: paths, feed addresses and keys stay out of the log.
+ */
+export function controlCallName(args) {
+  const words = args.slice(0, 2).map(String);
+  const at = args.indexOf('--profile');
+  const profile = at >= 0 && typeof args[at + 1] === 'string' && /^[\w.-]{1,64}$/.test(args[at + 1]) ? args[at + 1] : null;
+  return profile ? `${words.join(' ')} (profile ${profile})` : words.join(' ');
+}
+
+/** Operations the app uses. `run` is injectable so the host's tests need no Python; `log` (a line writer) makes every call write its start, its end and how long it took. */
+export function createControl({ control = findControl(), env = process.env, run = null, log = null, now = () => Date.now() } = {}) {
   if (!control) return null;
-  const call = run ?? ((args, options) => runCli(control, args, { env, ...options }));
+  const base = run ?? ((args, options) => runCli(control, args, { env, ...options }));
+  // A call to Control that never returns (a stuck stop, a start that waits) used to leave nothing in the host log to say which call it was or for how long.
+  let numbered = 0;
+  const call = !log ? base : async (args, options) => {
+    const n = ++numbered, name = controlCallName(args), t0 = now();
+    const secs = () => ((now() - t0) / 1000).toFixed(1);
+    try { log(`control #${n} begin ${name}`); } catch { /* a log must not break a call */ }
+    try {
+      const result = await base(args, options);
+      try { log(`control #${n} end ${name}: exit ${result?.code ?? '?'} after ${secs()} s`); } catch { /* as above */ }
+      return result;
+    } catch (error) {
+      try { log(`control #${n} failed ${name}: ${error?.code ?? error?.name ?? 'error'} after ${secs()} s`); } catch { /* as above */ }
+      throw error;
+    }
+  };
   const feedArgs = feed => (feed ? ['--feed', feed] : []);
   return {
     control,
     version: control.bundle?.version ?? null,
+    /**
+     * Use the newest whole Control there is now (findControl again), after an update installed one: true when it changed. Every later call runs the new one.
+     * The caller makes sure nothing of the old one is running (native-control.mjs switchControl).
+     */
+    reload({ find = findControl } = {}) {
+      const next = find({ env });
+      if (!next || resolve(next.dir) === resolve(control.dir)) return false;
+      control = next;
+      this.control = next;
+      this.version = next.bundle?.version ?? null;
+      return true;
+    },
     /**
      * The explicit update step. These are the only calls that let Control reach the network: `acquire` removes
      * STRATA_NO_ACQUIRE for that one process. Starting, serving, listing and rolling back never do.
@@ -199,7 +240,7 @@ export function createControl({ control = findControl(), env = process.env, run 
       const result = await call(args, { timeoutMs: 3 * 3600_000, acquire: true, onLine: onEvent ?? (() => {}), signal });
       if (result.json?.ok) return result.json;
       const failed = result.json?.results?.find?.(r => r.status === 'failed');
-      if (failed) throw Object.assign(new ControlError(failed.error, { exitCode: failed.exit_code ?? result.code, output: result.json }), { code: result.code === 7 ? 'engine_serving' : 'update_failed' });
+      if (failed) throw Object.assign(new ControlError(failed.error, { exitCode: failed.exit_code ?? result.code, output: result.json }), { code: result.code === 7 && !UPDATE_LOCK_HELD.test(failed.error ?? '') ? 'engine_serving' : result.code === 7 ? 'update_busy' : 'update_failed' });
       throw failure(result, 'The update failed.');
     },
     /** Install an engine package the person downloaded and chose (the offline path): no network; Control checks the package's own signature. */
@@ -219,7 +260,7 @@ export function createControl({ control = findControl(), env = process.env, run 
       if (result.json?.ok) return result.json;
       throw failure(result, 'The installed engines could not be read.');
     },
-    /** Switch to an installed engine (`strata components use`): nothing is downloaded. `root` is only for a DeepSeek engine that lives in more than one place. */
+    /** Switch to an installed engine (`strata components use`): nothing is downloaded. `root` is kept for older callers. */
     async useEngine({ family, folder }) {
       const result = await call(['components', 'use', folder, '--family', family, '--output', 'json'], { timeoutMs: 600_000 });
       if (result.json?.ok) return result.json;

@@ -13,10 +13,18 @@ export const PHASE_TEXT = {
   done: 'Done.',
 };
 
+/** The job line while an update waits for Control's update lock (another update or the app's own check holds it). Wording awaits the owner (lane APP-LIN item 4). */
+export const UPDATE_WAITING_FOR_LOCK = 'Waiting for the update check to finish…';
+
+/** The app window's updater has not been handed to the host (yet). Said in a finished update's summary only when it is all the person asked for (nothing else changed). */
+export const APP_UPDATER_NOT_READY = 'The app updater is not ready yet. Try again in a moment.';
+/** The shell's own check for a new app version did not work (feed unreachable...). Same rule; Settings shows the same sentence after every finished update. */
+export const APP_CHECK_FAILED = "Strata couldn't check for a new version of the app itself. Try again later.";
+
 /** True when the failure looks like a computer with no internet (no DNS, no route, refused), not a slow or broken server. */
 export function looksOffline(error) {
   const text = [error?.message, error?.cause?.message, error?.cause?.code, error?.code, error].filter(x => typeof x === 'string').join(' ');
-  return /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|ECONNREFUSED|getaddrinfo|fetch failed|network is unreachable|name or service not known|temporary failure in name resolution|nodename nor servname|No address associated|URLError/i.test(text);
+  return /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|ECONNREFUSED|getaddrinfo|fetch failed|network is unreachable|name or service not known|temporary failure in name resolution|nodename nor servname|No address associated|URLError|it looks offline|could not connect to/i.test(text);
 }
 export const OFFLINE_MESSAGE = "No internet connection. Try again when you're online.";
 
@@ -30,18 +38,19 @@ export function plainUpdateError(error, subject = 'engine', retry = undefined) {
   const keep = 'Your current version still works.';
   let message = `The update didn't finish and nothing was changed. ${keep}`;
   let next = `Press ${button} in Settings to try again.`;
-  if (code === 'engine_serving' || exit === 7 || /is serving/i.test(raw)) {
-    message = 'A model is running, so nothing was changed.';
-    next = `Unload the model in Models, then press ${button} in Settings.`;
-  } else if (/another update is already running/i.test(raw)) {
+  // Exit 7 is also the update lock (another update or a check holds it): told by its text, and checked first (QAGUI 0213 finding 3).
+  if (code === 'update_busy' || /another update is already running/i.test(raw)) {
     message = 'An update is already running.';
     next = `Wait a moment, then press ${button} in Settings.`;
+  } else if (code === 'engine_serving' || exit === 7 || /is serving/i.test(raw)) {
+    message = 'A model is running, so nothing was changed.';
+    next = `Unload the model in Models, then press ${button} in Settings.`;
   } else if (/test start|did not start correctly|did not answer a one-token|did not become ready/i.test(raw)) {
     message = `The new ${subject} didn't start correctly, so nothing was changed. ${keep}`;
   } else if (looksOffline(error) || looksOffline(raw)) {
     message = 'No internet connection.';
     next = "Try again when you're online.";
-  } else if (/could not be read|interrupted|timed out|timeout|ECONN|ENOTFOUND|fetch failed|could not reach|server answered|not answer within/i.test(raw)) {
+  } else if (/could not be read|interrupted|timed out|timeout|ECONN|ENOTFOUND|fetch failed|could not reach|server answered|not answer within|did not answer/i.test(raw)) {
     message = "Couldn't reach the update server.";
     next = `Check your internet connection, then press ${button} in Settings.`;
   } else if (/free space|not enough|no space left|disk is full/i.test(raw)) {
@@ -75,7 +84,8 @@ export function plainEngineError(error, action = 'switch') {
   const raw = String(error?.message ?? error ?? '');
   const exit = error?.exitCode ?? null;
   let message = action === 'delete' ? "The engine wasn't deleted. Nothing else was changed." : "The engine wasn't switched. Nothing was changed.";
-  if (exit === 7 || /is serving|model is running/i.test(raw)) message = 'A model is running, so nothing was changed. Unload the model in Models, then try again.';
+  if (/another update is already running/i.test(raw)) message = 'An update is running. Wait for it to finish, then try again.';
+  else if (exit === 7 || /is serving|model is running/i.test(raw)) message = 'A model is running, so nothing was changed. Unload the model in Models, then try again.';
   else if (/engine in use/i.test(raw)) message = 'This is the engine in use. Switch to another one first, then delete it.';
   else if (/running program is using|something is using it/i.test(raw)) message = 'A program is still using this engine, so it was not deleted. Unload your models and try again.';
   else if (/not installed|already been deleted/i.test(raw)) message = 'That engine is already gone. The list has been refreshed.';

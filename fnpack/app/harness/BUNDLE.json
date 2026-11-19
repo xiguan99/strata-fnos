@@ -1,13 +1,39 @@
 {
   "component": "deepseek-harness",
   "version": "0.2.1-alpha.3",
-  "commit": "571902028a",
+  "commit": "571902028a75c64c1d767f4ae5fd099485f0ddf0",
   "license": "MIT",
   "platform": "linux",
   "node": "v24.12.0",
-  "bytes": 235636334,
+  "bytes": 235642433,
   "files": 23410,
   "entry": "apps/cli/lib/bin.js",
-  "builtAt": "2026-10-18T22:25:43.731Z",
+  "builtAt": "2026-11-17T16:30:37.846Z",
+  "patches": [
+    {
+      "id": "strata-pi-ai-context-safety-v2",
+      "package": "@earendil-works/pi-ai",
+      "version": "1.1.0",
+      "file": "node_modules/@earendil-works/pi-ai/dist/api/simple-options.js",
+      "beforeSha256": "9b3cc0ae6daa86fdc050bc0cb0f3f986401e64ccddbde6757183c9f8ad411be2",
+      "afterSha256": "fe657e357bdf1f32c686da1b7f06dc4dc91a2ad5e55d13a6850e63fb12b0d1fb"
+    },
+    {
+      "id": "strata-fs-search-partial-v1",
+      "package": "@deepseek-ai/dsh-tool-fs-search",
+      "version": "0.2.1-alpha.3",
+      "file": "node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js",
+      "beforeSha256": "8d64d2e8a5310b442ae66bc0daf7d6957ec095dbe43cabd9eb208f7370e381ed",
+      "afterSha256": "548d2aba902a8328645bd241d64db93ccc701c475c82d0fdb45563f121a04571"
+    },
+    {
+      "id": "strata-mcp-session-reconnect-v1",
+      "package": "@deepseek-ai/dsh-mcp-client",
+      "version": "0.2.1-alpha.3",
+      "file": "node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js",
+      "beforeSha256": "758d8fc473b700b5d351158d06ce9f9e92c16e8b25497b08bb7bd2122a87f5dd",
+      "afterSha256": "aa69595ead5b857adf9f506bb2c85f691282fb46c630b43b72414977ff38e6fa"
+    }
+  ],
   "note": "Pruned production install (pnpm deploy --prod). No package manager runs on the user's PC."
 }

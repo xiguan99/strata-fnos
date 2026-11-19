@@ -12,6 +12,8 @@ import { askFor } from './ask.mjs';
 import { FIT_TEXT, fill } from './context-fit.mjs';
 import { isContextOverflow } from './context-budget.mjs';
 import { ToolDraft, cutCalls } from './reply-cut.mjs';
+import { REFUSED as ADMIN_REFUSED } from './admin-tool-mcp.mjs';
+import { BLOCKED_REASON } from './plugins/strata-gate.mjs';
 
 const SHELL = new Set(['pwsh', 'bash', 'job_kill', 'job_output', 'job_list']);
 const WRITE = new Set(['write', 'edit']);
@@ -44,7 +46,13 @@ export function parseArguments(raw) {
  * One plain sentence and one short detail per tool, so a card never shows raw JSON or an internal tool name as its
  * explanation. Unknown tools (a connected MCP server's) fall back to a generic sentence with their arguments.
  */
+/** #5968: Run as administrator (admin-tool-mcp.mjs) and the line the reply gets when the person chose No at the Windows prompt. */
+const ADMIN_TOOL_NAME = 'mcp__strata-admin__run_as_administrator';
+const ADMIN_REFUSED_LINE = 'Administrator rights were refused at the Windows prompt.';
+/** #5737: the line the reply gets when the gate refused a call that named a blocked folder ({0}: the folder as the person entered it). */
+const BLOCKED_LINE = 'Blocked: {0} is in your blocked folders (Settings → Tools).';
 const WORDS = {
+  'mcp__strata-admin__run_as_administrator': a => ['Runs a command as administrator. Windows asks you first.', a.command],
   read: a => ['Reads a file.', a.file_path ?? a.path],
   glob: a => ['Looks for files by name.', a.pattern],
   grep: a => ['Searches inside files.', a.pattern ?? a.query],
@@ -202,9 +210,12 @@ export class TurnProjector {
    * `policy` is the session's approval policy for this turn. Under `never` the Harness rejects an ask by itself, so
    * no question ever reaches the person: the card goes straight from running to denied, without a moment where it
    * offers Approve and Deny buttons that would do nothing.
+   * `catchUp` is for a turn followed only after it began (one the Harness started by itself): a committed reply no live frame carried is
+   * shown whole, because its stream went by before anyone listened.
    */
-  constructor({ startedAt = Date.now(), policy = 'ask', window = 0 } = {}) {
+  constructor({ startedAt = Date.now(), policy = 'ask', window = 0, catchUp = false } = {}) {
     this.startedAt = startedAt;
+    this.catchUp = catchUp;
     this.window = Number(window) || 0;   // the model's window, for the figures in the line that says the chat was summarised
     this.summarizing = false;
     this.policy = policy;
@@ -328,7 +339,7 @@ export class TurnProjector {
         // Reconcile a text the live frames did not fully carry (a socket gap), never duplicating it.
         const live = [...this.emittedText.values()].pop() ?? 0;
         const text = (d.message?.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('');
-        if (text.length > live && live > 0) out.push({ type: 'delta', text: text.slice(live) });
+        if (text.length > live && (live > 0 || this.catchUp)) { if (!live) this.emittedAny = true; out.push({ type: 'delta', text: text.slice(live) }); }
         this.emittedText.clear();
         break;
       }
@@ -384,6 +395,17 @@ export class TurnProjector {
           durationMs: Math.max(0, (e.time ?? 0) - entry.calledAt),
         });
         if (frame) out.push(frame);
+        // #5968: the person chose No at the Windows administrator prompt: one plain line in the reply, in their language
+        if (!denied && entry.card.name === ADMIN_TOOL_NAME && resultText(d.message).startsWith(ADMIN_REFUSED)) {
+          out.push({ type: 'delta', own: true, text: `\n\n${ADMIN_REFUSED_LINE}`, key: ADMIN_REFUSED_LINE, values: [], noteReason: 'admin-refused' });
+        }
+        // #5737: the gate refused a call that named a blocked folder: one plain line in the reply that says which folder
+        const blockedAt = resultText(d.message).indexOf(BLOCKED_REASON);
+        if (blockedAt >= 0 && !this.blockedSaid?.has(callId)) {
+          const shown = /\(([^()]*)\)\s*$/.exec(resultText(d.message).slice(blockedAt + BLOCKED_REASON.length))?.[1] ?? '';
+          (this.blockedSaid ??= new Set()).add(callId);
+          out.push({ type: 'delta', own: true, text: `\n\n${fill(BLOCKED_LINE, [shown])}`, key: BLOCKED_LINE, values: [shown], noteReason: 'blocked-folder' });
+        }
         break;
       }
       case 'compaction/start':
@@ -479,6 +501,24 @@ export class TurnProjector {
         return [{ type: 'error', message: 'The agent turn was interrupted before it finished.', code: 'INTERRUPTED' }];
     }
   }
+}
+
+/**
+ * The reply a follow opened in the middle of: the Harness's reconnect baseline (`assistantStream.activeAttempt` of a `session/follow` snapshot,
+ * its compact records) as the live `assistant-stream` items the projector reads, so the text so far is shown and counted before the rest arrives.
+ */
+export function baselineItems(baseline) {
+  const a = baseline?.activeAttempt;
+  if (!a || !Array.isArray(a.stream)) return [];
+  const out = [];
+  const item = chunk => out.push({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: a.attemptId, index: out.length, chunk } });
+  for (const r of a.stream) {
+    if (r?.type === 'text-chunks') for (const text of r.texts ?? []) item({ type: 'text-delta', index: r.index, text });
+    else if (r?.type === 'reasoning-chunks') for (const text of r.texts ?? []) item({ type: 'reasoning-delta', index: r.index, text });
+    else if (r?.type === 'tool-call-chunks') for (const [n, argumentsDelta] of (r.args ?? []).entries()) item({ type: 'tool-call-delta', index: r.index, id: r.id, ...(n === 0 && r.name ? { name: r.name } : {}), argumentsDelta });
+    else if (r?.type === 'chunk' && r.chunk) item(r.chunk);
+  }
+  return out;
 }
 
 /** Whether a failure is the model server saying the conversation does not fit its window (its code, or the engine's own words). */
