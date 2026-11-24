@@ -21,7 +21,16 @@ if [ "${RUN_USER}" != "root" ] && id "${RUN_USER}" >/dev/null 2>&1; then
     chown -R "${RUN_USER}" "${TRIM_PKGVAR}" 2>/dev/null || true
 fi
 
-bash "$(dirname "$0")/main" start || { echo "启动失败，详见应用中心日志"; exit 1; }
-echo "Strata 已启动：桌面图标/浏览器端口直达 http://<NAS>:8791/"
-log_msg "install_callback 完成"
+# 首启失败绝不能带崩安装流程：install_callback 返回非 0 会被 fnOS 判成
+# ErrCodeInstallCallbackException(10238)，UI 只显示「执行脚本出错且原因未知」并整包回滚。
+# 最常见原因是 service_port 被别的程序占用（例如 8791 已交给面板），此时安装照常完成。
+START_PORT="${TRIM_SERVICE_PORT:-8791}"
+bash "$(dirname "$0")/main" start
+START_RC=$?
+if [ "${START_RC}" -eq 0 ]; then
+    log_msg "install_callback 完成（strata host 已启动，端口 ${START_PORT}）"
+else
+    HOLDER="$(ss -lntp 2>/dev/null | grep -F ":${START_PORT} " | head -n 3 | tr '\n' ' ' | sed 's/  */ /g')"
+    log_msg "首启未成功 rc=${START_RC}：安装继续、不影响本次升级；端口 ${START_PORT} 当前占用者=${HOLDER:-未探测到}。需要时可在应用中心点启动，或先停掉占用该端口的程序"
+fi
 exit 0
